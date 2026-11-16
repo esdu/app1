@@ -109,6 +109,68 @@ final class RewindCamUITests: XCTestCase {
         XCTAssertTrue(settingsApp.wait(for: .runningForeground, timeout: 15), "the Settings app did not open")
     }
 
+    /// Camera denied (issue #8): a red notice explains it with Open Settings, Save is disabled, the
+    /// Settings sheet still works. Tapping Open Settings opens the Settings app and (in UI-test mode)
+    /// stands in for the user allowing the camera there; back in RewindCam, recording starts without
+    /// a relaunch.
+    @MainActor
+    func testCameraDeniedOffersOpenSettingsAndRecordsAfterReturning() {
+        let app = launch(extraArguments: ["-UITestDenyCamera"])
+        let banner = element(app, "cameraDeniedBanner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "no camera-denied banner")
+        let openSettings = banner.buttons["openSettingsButton"]
+        XCTAssertTrue(openSettings.exists, "no Open Settings button in the camera banner")
+        let save = app.buttons["saveButton"]
+        XCTAssertFalse(save.isEnabled, "Save must be disabled while nothing is recorded")
+        let badge = element(app, "recordingBadge")
+        XCTAssertFalse(badge.label.contains("REC"), "badge says: \(badge.label)")
+        XCTAssertFalse(element(app, "microphoneBanner").exists)
+        screenshot(app, "denied-1")
+
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5), "Settings sheet did not open")
+        screenshot(app, "denied-2-settings-sheet")
+        app.buttons["doneButton"].tap()
+        XCTAssertTrue(openSettings.waitForExistence(timeout: 5))
+        XCTAssertTrue(banner.exists, "still denied after closing the Settings sheet")
+
+        openSettings.tap()
+        let settingsApp = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        XCTAssertTrue(settingsApp.wait(for: .runningForeground, timeout: 15), "the Settings app did not open")
+
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "RewindCam did not come back")
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 15), "camera banner still shown after access was allowed")
+        let enabled = NSPredicate(format: "isEnabled == true")
+        wait(for: [expectation(for: enabled, evaluatedWith: save)], timeout: 15)
+        let recording = NSPredicate(format: "label BEGINSWITH %@", "REC")
+        wait(for: [expectation(for: recording, evaluatedWith: badge)], timeout: 15)
+        screenshot(app, "denied-3-recording-after-return")
+    }
+
+    /// Another start failure (no camera): the notice offers Try Again, which tries the start again.
+    @MainActor
+    func testCameraStartFailureOffersTryAgain() {
+        let app = launch(extraArguments: ["-UITestNoCamera"])
+        let banner = element(app, "errorBanner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "no start-failure banner")
+        let why = banner.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "No camera is available")).firstMatch
+        XCTAssertTrue(why.exists, "the banner doesn't say why")
+        let tryAgain = banner.buttons["tryAgainButton"]
+        XCTAssertTrue(tryAgain.exists, "no Try Again button")
+        XCTAssertFalse(app.buttons["openSettingsButton"].exists, "not a permission problem")
+        XCTAssertFalse(app.buttons["saveButton"].isEnabled, "Save must be disabled while nothing is recorded")
+        screenshot(app, "start-failed-1")
+
+        tryAgain.tap()
+        // The simulated camera is still missing: the attempt fails again and the notice returns.
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "no banner after Try Again")
+        XCTAssertTrue(banner.buttons["tryAgainButton"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["saveButton"].isEnabled)
+        screenshot(app, "start-failed-2-after-try-again")
+    }
+
     @MainActor
     func testChangeBufferTo60Seconds() {
         let app = launch()

@@ -21,7 +21,19 @@ final class AppModel {
         case starting
         case recording
         case paused(String)
+        /// Capture couldn't start because camera access is denied or restricted (issue #8). Fixed in
+        /// the Settings app; see `startFailureNotice`.
+        case cameraDenied
+        /// Capture couldn't start for another reason (no camera, configuration failed). Try Again.
         case failed(String)
+
+        /// The last start attempt failed; nothing is captured until a start succeeds.
+        var isStartFailure: Bool {
+            switch self {
+            case .cameraDenied, .failed: true
+            default: false
+            }
+        }
     }
 
     private(set) var phase: Phase = .idle
@@ -180,6 +192,38 @@ final class AppModel {
         }
     }
 
+    static let cameraDeniedMessage = "RewindCam needs the camera to keep the last moments ready to save, "
+        + "so nothing is being recorded. Allow it in Settings › RewindCam › Camera."
+
+    /// Shown while capture couldn't start (issue #8): camera denied → **Open Settings**; any other
+    /// start failure → **Try Again**. Either way the app also re-checks when it returns to the
+    /// foreground (`scenePhaseChanged(.active)`), e.g. after the user allowed the camera in Settings.
+    var startFailureNotice: AppNotice? {
+        switch phase {
+        case .cameraDenied:
+            AppNotice(id: "cameraDeniedBanner", systemImage: "video.slash.fill", title: "Camera access is off",
+                      message: Self.cameraDeniedMessage, severity: .error, action: .openSettings)
+        case .failed(let why):
+            AppNotice(id: "errorBanner", systemImage: "exclamationmark.triangle.fill", title: "Not recording",
+                      message: why, severity: .error, action: .tryAgain)
+        default:
+            nil
+        }
+    }
+
+    /// Why Save can't do anything right now (nil while recording: nothing is buffered in any other
+    /// phase). The Save button is disabled and says this in its accessibility hint; a save from the
+    /// volume buttons shows it as a toast.
+    var saveUnavailableReason: String? {
+        switch phase {
+        case .recording: nil
+        case .idle, .starting: "The camera is starting."
+        case .paused: "Recording is paused."
+        case .cameraDenied: "Camera access is off, so nothing is being recorded."
+        case .failed: "The camera isn't running, so nothing is being recorded."
+        }
+    }
+
     /// The "Listening" row in Settings.
     var voiceListeningLabel: String {
         if isVoiceListening { return "Yes" }
@@ -210,13 +254,25 @@ final class AppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
-            if !wantsRunning { start() }
+            // Not running (launch, back from the background), or the last start failed: start again.
+            // The failed case is how "allowed the camera in Settings and came back" recovers when iOS
+            // doesn't background the app in between (e.g. a permission prompt was just answered).
+            if !wantsRunning || self.phase.isStartFailure { start() }
         case .background:
             setDimmed(false)
             stop(reason: .backgrounded)
         default:
             break // .inactive (Control Center, alerts): capture keeps running.
         }
+    }
+
+    /// "Try Again" (`AppNotice.Action.tryAgain`) after a start failure. Goes through `start()`, the
+    /// same pipeline as launch and foreground; ignored unless the last start failed, so a double tap
+    /// queues only one attempt.
+    func retryStart() {
+        guard phase.isStartFailure else { return }
+        phase = .starting
+        start()
     }
 
     // MARK: Settings
@@ -281,6 +337,12 @@ final class AppModel {
     func save(trigger: SaveTrigger = .button) -> Task<Void, Never>? {
         guard !isSaving else {
             showToast("Already saving — hold on…")
+            return nil
+        }
+        if let reason = saveUnavailableReason {
+            // The button is disabled; this is the volume buttons (or a stale voice callback).
+            environment.haptics.failure()
+            showToast("Can't save. \(reason)", isError: true)
             return nil
         }
         let postRoll = Double(settings.postRollSeconds)
@@ -483,11 +545,26 @@ final class AppModel {
             batteryDrain.reset(configuration: measuredConfiguration)
             requestPhotosAccessOnce()
         } catch {
-            appliedCapture = nil
-            activeCapture = nil
-            phase = .failed(error.localizedDescription)
+            await startFailed(error)
         }
         refreshStatus()
+    }
+
+    /// Capture didn't start (issue #8). Nothing runs and Save is disabled; `startFailureNotice` says
+    /// why and offers the fix. Recovery is only ever a new `bringUp` through the pipeline: Try Again
+    /// (`retryStart`) or the foreground re-check in `scenePhaseChanged(.active)`.
+    private func startFailed(_ error: Error) async {
+        appliedCapture = nil
+        activeCapture = nil
+        stopVoice()
+        // A failed reconfigure can leave a half-built session running; the recorder is already suspended.
+        await environment.source.stop()
+        environment.screen.setIdleTimerDisabled(false)
+        if let error = error as? FrameSourceError, error == .cameraAccessDenied {
+            phase = .cameraDenied
+        } else {
+            phase = .failed(error.localizedDescription)
+        }
     }
 
     private func tearDown(reason: InterruptionReason?) async {
@@ -502,6 +579,8 @@ final class AppModel {
     }
 
     private func handle(_ event: FrameSourceEvent) {
+        // A source that failed to start has nothing to pause or resume; keep the failure notice.
+        guard !phase.isStartFailure else { return }
         switch event {
         case .interrupted(let reason):
             recorder.suspend()

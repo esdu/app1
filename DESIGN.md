@@ -171,8 +171,29 @@ the microphone and didn't get it, `AppModel.microphoneNotice` produces an `AppNo
 "The voice trigger can't listen", or both) rendered by `NoticeBanner` with an **Open Settings** button;
 the voice trigger isn't started and its Settings row says why; the settings themselves are untouched.
 `AppNotice`/`NoticeBanner` and `AppModel.openAppSettings()` (via the `AppSettingsOpener` protocol on
-`AppEnvironment`, `FakeAppSettingsOpener` in tests) are the one "go to Settings" path, meant to be reused
-for camera access. The next start re-reads the permission, so allowing the mic and returning restores sound.
+`AppEnvironment`, `FakeAppSettingsOpener` in tests) are the one "go to Settings" path, reused for camera
+access below. The next start re-reads the permission, so allowing the mic and returning restores sound.
+
+### Start failures (camera denied)
+
+`FrameSource.start` throws only when video can't be captured. `AppModel.bringUp` hands the error to
+`startFailed`, which stops the source (a failed reconfigure may leave a half-built session), lets the
+screen lock again and sets one of two phases:
+
+* `.cameraDenied` for `FrameSourceError.cameraAccessDenied`: `startFailureNotice` is a red
+  "Camera access is off" `AppNotice` that says why the app needs the camera, with **Open Settings**
+  (the same `AppNotice.Action.openSettings` as the microphone notice);
+* `.failed(message)` for anything else (`.noCamera`, `.configurationFailed`): the notice shows the
+  message with **Try Again** (`AppNotice.Action.tryAgain` → `AppModel.retryStart()`).
+
+There is no separate restart path. Recovery is always a new `bringUp` queued on the pipeline by
+`start()`: Try Again (ignored unless the last start failed, so a double tap makes one attempt), or
+`scenePhaseChanged(.active)`, which starts when not running *or* when the last start failed. Leaving
+for the Settings app normally goes through `.background` (stop) and back (start); the explicit
+failed-phase check covers an `.active` without a background trip, e.g. right after a permission prompt.
+While a start has failed, source events are ignored (nothing to pause or resume) and
+`saveUnavailableReason` disables Save; it is non-nil in every phase but `.recording`, because the
+recorder is suspended and holds nothing then. A save from the volume buttons shows it as a toast.
 
 ### Bounded disk
 
@@ -243,8 +264,10 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   the fake library's clip count so XCUITest can check it. `FakePhotoLibrary` can deny access or fail
   the next saves; `-UITestPhotosFailOnce` makes the first save fail so a UI test can tap Retry.
   `-UITestDenyMicrophone` makes the synthetic source report a denied microphone and emit no audio.
-* **Not covered by CI**: `CameraFrameSource` (including the real microphone prompt and its failure
-  paths), `AVCaptureEventInteraction` (volume buttons),
+  `-UITestDenyCamera` makes its start throw `.cameraAccessDenied` until Open Settings is tapped (standing
+  in for the user allowing it), and `-UITestNoCamera` makes it throw `.noCamera` (Try Again path).
+* **Not covered by CI**: `CameraFrameSource` (including the real camera and microphone prompts and
+  their failure paths), `AVCaptureEventInteraction` (volume buttons),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),
   background-task time after locking the phone, and battery drain. See the manual checklist in the README.
 

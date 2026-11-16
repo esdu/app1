@@ -32,6 +32,11 @@ source, because the Simulator has no camera.*
 - **Microphone denied**: recording carries on without sound. A banner says sound is off (and that
   the voice trigger can't listen, if it is on) because microphone access is denied, with an
   **Open Settings** button. "Record sound" stays as you set it, and sound comes back once access is allowed.
+- **Camera denied**: a red "Camera access is off" banner says why RewindCam needs the camera, with an
+  **Open Settings** button; nothing is recorded and Save is disabled (it says why). If the camera
+  can't start for another reason (no camera, configuration failed), the banner offers **Try Again**.
+  The app checks again whenever it comes back to the foreground, so allowing the camera in Settings
+  and returning starts recording without a relaunch. Settings and the unsaved-clips Retry keep working.
 - **Long sessions**: the screen stays awake. A **Dim** overlay drops brightness to 2 % and
   you tap to wake. The app watches thermal state and steps quality down (and tells you) when the
   phone gets hot. Battery level is shown.
@@ -73,6 +78,8 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - Background time for finishing a save, the real Photos permission prompt and Photos import errors
   are not verified on a device yet.
 - The voice trigger is English (en-US) and needs a device that supports on-device recognition.
+- The camera-denied and start-failure paths are tested with the synthetic source (unit and UI tests);
+  the real camera prompt and `CameraFrameSource`'s configuration failures are not verified on a device yet.
 - With the microphone denied, clips have no sound track at all. The microphone paths of
   `CameraFrameSource` (denied prompt, a mic input that can't be added) are not verified on a device yet;
   CI simulates the denial with the synthetic source.
@@ -140,6 +147,12 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       trigger on, its "Listening" row says the microphone is denied. Tap **Open Settings**: RewindCam's
       page opens. Allow the microphone and return (iOS may relaunch the app): the banner is gone and the
       next clip has sound.
+- [ ] **Camera denied**: on a fresh install, choose "Don't Allow" at the camera prompt. A red
+      "Camera access is off" banner explains why the app needs it; the badge says CAMERA OFF, Save is
+      greyed out (VoiceOver reads why), and a volume-button press shows "Can't save" instead of saving.
+      The Settings sheet still opens. Tap **Open Settings**: RewindCam's page opens. Allow the camera and
+      return (iOS may relaunch the app): recording starts without relaunching by hand, the banner is
+      gone, and Save works.
 - [ ] **Lock during save**: with +10 s post-roll, tap Save and lock the phone at once. After 30 s,
       unlock: the clip is in Photos (or, if not, offered for Retry), never silently gone.
 
@@ -150,6 +163,8 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
 - `-UITestMode` launch argument: synthetic camera, fake photo library in `Documents/FakePhotoLibrary`,
   fresh settings, no kept clips. Add `-UITestPhotosFailOnce` to make the first Photos save fail, or
   `-UITestDenyMicrophone` to make the synthetic source behave as if microphone access were denied.
+  `-UITestDenyCamera` makes every start fail as if camera access were denied, until **Open Settings** is
+  tapped (which stands in for allowing it there); `-UITestNoCamera` makes every start fail with "no camera".
 - CI ([`.github/workflows/ios.yml`](.github/workflows/ios.yml)): newest macOS runner and newest
   Xcode, iPhone simulator picked dynamically, `xcodebuild test`, then the unit tests four more times as a
   flake check. Per-test timeouts are on (180 s default, 300 s maximum), so a hung test fails by name
