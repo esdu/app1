@@ -94,6 +94,14 @@ struct AppModelTests {
         // Temp files are cleaned up after the save.
         let leftovers = (try? FileManager.default.contentsOfDirectory(atPath: h.storage.clipsDirectory.path)) ?? []
         #expect(leftovers.isEmpty, "leftovers: \(leftovers)")
+        // Once Photos has it, nothing is kept and no retry is offered.
+        let kept = (try? FileManager.default.contentsOfDirectory(atPath: h.storage.unsavedDirectory.path)) ?? []
+        #expect(kept.isEmpty, "kept: \(kept)")
+        #expect(model.unsavedClips.isEmpty)
+        // One background-task assertion, begun at Save and ended when the save finished.
+        #expect(h.backgroundTasks.begun == 1)
+        #expect(h.backgroundTasks.ended == 1)
+        #expect(h.backgroundTasks.activeCount == 0)
         model.stop()
         await model.waitForPipeline()
     }
@@ -171,7 +179,8 @@ struct AppModelTests {
         await model.waitForPipeline()
     }
 
-    private func waitUntil(timeout: Double = 5, _ condition: @MainActor () -> Bool) async throws {
+    /// Polls a condition (bounded). Shared with the save-path tests in `SavePathTests.swift`.
+    func waitUntil(timeout: Double = 5, _ condition: @MainActor () -> Bool) async throws {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() {
             if Date() > deadline { throw TimeoutError(description: "condition not met") }

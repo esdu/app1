@@ -8,9 +8,9 @@ final class RewindCamUITests: XCTestCase {
     }
 
     @MainActor
-    private func launch() -> XCUIApplication {
+    private func launch(extraArguments: [String] = []) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments = ["-UITestMode"]
+        app.launchArguments = ["-UITestMode"] + extraArguments
         app.launch()
         XCTAssertTrue(app.buttons["saveButton"].waitForExistence(timeout: 20), "main screen did not appear")
         return app
@@ -48,6 +48,29 @@ final class RewindCamUITests: XCTestCase {
         let oneClip = NSPredicate(format: "label == %@", "Fake library: 1")
         wait(for: [expectation(for: oneClip, evaluatedWith: count)], timeout: 10)
         screenshot(app, "save-4-library-has-1")
+    }
+
+    /// The fake Photos library fails the first save: the clip is kept, a banner offers Retry, and
+    /// Retry adds it.
+    @MainActor
+    func testPhotosFailureKeepsClipAndRetryAddsIt() {
+        let app = launch(extraArguments: ["-UITestPhotosFailOnce"])
+        Thread.sleep(forTimeInterval: 5) // let the synthetic buffer fill
+
+        app.buttons["saveButton"].tap()
+        let banner = element(app, "unsavedBanner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 20), "no unsaved-clips banner after a failed Photos save")
+        screenshot(app, "unsaved-1-banner")
+        XCTAssertEqual(element(app, "fakeLibraryCount").label, "Fake library: 0")
+
+        let retry = app.buttons["retryUnsavedButton"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 5), "no Retry button")
+        retry.tap()
+        let count = element(app, "fakeLibraryCount")
+        let oneClip = NSPredicate(format: "label == %@", "Fake library: 1")
+        wait(for: [expectation(for: oneClip, evaluatedWith: count)], timeout: 20)
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 10), "banner still shown after a successful retry")
+        screenshot(app, "unsaved-2-after-retry")
     }
 
     @MainActor

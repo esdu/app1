@@ -30,7 +30,7 @@ Photos as one clip. The app has no network code, no accounts and no analytics.
 | Capture | `FrameSource` protocol: `CameraFrameSource` (AVCaptureSession) and `SyntheticFrameSource` (test-pattern `CVPixelBuffer`s + silent PCM) | `SyntheticFrameSource` in manual mode (frames generated as fast as the encoder takes them, with synthetic timestamps) |
 | Buffer | `RollingRecorder` (writer + segment files) and `SegmentRing` (pure eviction policy) | unit tests, no camera needed |
 | Export | `ClipExporter`: concatenate init + segments, trim with `AVMutableComposition`, passthrough export to `.mov` | unit tests load the result with `AVURLAsset` and decode every frame |
-| Side effects | `PhotoLibrary`, `BufferStorage`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore` (all protocols) | fakes in tests and in `-UITestMode` |
+| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore` (all protocols) | fakes in tests and in `-UITestMode` |
 | UI | SwiftUI; `AppModel` is the single source of truth | XCUITest with `-UITestMode` |
 
 ### Threading (Swift 6 strict concurrency)
@@ -90,10 +90,55 @@ segment even if coverage falls below the buffer length. Retained duration is the
    so it works whatever the writer's internal timeline origin is), inserts that range into an
    `AVMutableComposition`, and exports with `AVAssetExportPresetPassthrough` to `.mov`. Passthrough
    needs no re-encode, and the edit list makes the trim frame-accurate.
-5. The `.mov` goes to Photos (add-only). Then the job folder and temp files are deleted.
+5. The export is written to `UnsavedClips/<name>.partial.mov` in Application Support and renamed
+   to `<name>.mov` only when it is complete, so a `.mov` there is always whole. The job folder is
+   then deleted. From here on the `.mov` is the clip's only copy, and it is durable.
+6. Photos (add-only) gets a **hard link** of the `.mov`, staged in `Caches/RewindClips/photos-<uuid>/`.
+   Photos may move or consume that link, even when it fails, without touching the kept copy. Only when
+   Photos reports success is the `.mov` deleted (no extra bytes: the link shares the data).
+7. If Photos fails (access denied or restricted, `performChanges` error such as low storage), the
+   `.mov` stays. The user gets an error toast and a banner, "1 clip isn't in Photos yet", with the
+   reason and a **Retry** button. Retry offers every kept clip again, oldest first, and stops at the first
+   failure. The banner and the clips survive relaunches.
 
 If less than *N* seconds is buffered (e.g. 4 s after launch), the clip is whatever exists.
 Only one save can be pending at a time. A second tap during post-roll shows "Already saving".
+
+### Save path: durability
+
+The aim is that once Save has produced a clip, nothing but a successful Photos import deletes it.
+
+* **Photos permission** is requested once per launch, right after the camera starts (camera and
+  microphone prompts come first), not during the first save. The request is not awaited by the
+  start/stop pipeline. If it is denied, a banner says how to allow it, and saves still keep their clips.
+* **Background time.** Each save (from the tap to the end of the Photos import) and each Retry runs inside
+  a `UIApplication.beginBackgroundTask` assertion, behind the `BackgroundTasks` protocol on
+  `AppEnvironment` (`FakeBackgroundTasks` in tests counts begin/end pairs). Locking the phone or switching
+  apps during post-roll resolves the save early (§ Interruptions) and the export and import then
+  continue in background time. If iOS ends that time, the assertion is ended in its expiration
+  handler; a clip already renamed to `.mov` survives suspension or termination and is offered on the
+  next launch.
+* **Launch cleanup** (`BufferStorage.removeOrphans`, run once per process before capture starts):
+  deletes the ring, every save job folder and Photos staging folder in `Caches/RewindClips/`, and any
+  stray `*.partial.mov`. It never deletes a finished `*.mov` in `UnsavedClips/`; those are listed for Retry.
+* **What can still be lost**: a save whose process dies before its export finished (during
+  post-roll or the few seconds of export). Its job folder holds only hard-linked segments with no
+  manifest, and it is removed on the next launch. Finishing such jobs on relaunch would need a
+  manifest written next to the segments; it is not implemented.
+* **Duplicates over loss**: if the process dies after Photos accepted a clip but before the kept `.mov`
+  was deleted, the clip is offered again and a Retry adds it to Photos a second time.
+
+### Folders
+
+| Folder | Location | Contents | Lifetime |
+|---|---|---|---|
+| `RewindBuffer/` | Caches | the ring: one `gen-N/` folder per writer generation (`init.mp4`, `seg-*.m4s`) | wiped on launch, interruption and quality change |
+| `RewindClips/save-<uuid>/` | Caches | one save job: hard-linked `init.mp4` and segments, then `source.mp4` while exporting | deleted when the export ends (success or failure); wiped on launch |
+| `RewindClips/photos-<uuid>/` | Caches | a hard link of a kept clip, handed to Photos | deleted after each Photos attempt; wiped on launch |
+| `UnsavedClips/` | Application Support, excluded from backup | `*.partial.mov` (export in progress), `*.mov` (finished, not yet in Photos) | `.partial.mov` deleted on launch; `.mov` deleted only after Photos accepts it |
+
+`BufferStorage` (`FileBufferStorage`) owns these paths. Tests point it at temp folders, and the
+model tests treat "a new `AppModel` on the same storage" as a relaunch.
 
 ### Interruptions and generations
 
@@ -130,13 +175,20 @@ peaks and container overhead, and the 3 s covers the extra segment held plus the
 Example: 1080p30 with 120 s gives 1.258 MB/s × 123 s × 1.5 ≈ **232 MB**.
 
 **Worst case during a save**: ring cap + post-roll segments (≤ 30 s × rate, hard-linked)
-+ concatenated temp file (≤ clip) + exported `.mov` (≤ clip, moved into Photos). For 4K60, 120 s and
++ concatenated temp file (≤ clip) + exported `.mov` (≤ clip, in `UnsavedClips/`). For 4K60, 120 s and
 30 s post-roll that is about 1.15 GB + 0.19 GB + 2 × 0.94 GB ≈ 3.2 GB for a few seconds. For the default (1080p30, 30 s,
-no post-roll) it is about 60 MB + 2 × 38 MB ≈ 136 MB. The temp files are deleted as soon as Photos
-has the clip.
+no post-roll) it is about 60 MB + 2 × 38 MB ≈ 136 MB. The segments and the temp file are deleted as
+soon as the export finishes; the `.mov` as soon as Photos has the clip. The Photos staging link adds no
+bytes.
 
-**Orphans**: `Caches/RewindBuffer/` and `Caches/RewindClips/` are wiped on every launch,
-before capture starts. They can only hold leftovers from a previous process (crash, kill, OOM).
+**Unsaved clips** are outside that bound: each clip that didn't reach Photos keeps its full size
+(≤ (N + post-roll) × rate, e.g. 38 MB for the default, ≈ 0.94 GB for 4K60 with 120 s + 30 s) in
+Application Support until a Retry succeeds. They are counted in `BufferStorage.unsavedClips()`
+(`UnsavedClip.bytes`). The app never deletes them on its own; there is no in-app delete yet.
+
+**Orphans**: `Caches/RewindBuffer/`, `Caches/RewindClips/` and stray `UnsavedClips/*.partial.mov`
+are removed on every launch, before capture starts. They can only hold leftovers from a previous
+process (crash, kill, OOM). Finished clips in `UnsavedClips/` are kept (see "Save path: durability").
 
 ## 3. Quality and thermal policy (`QualityGovernor`)
 
@@ -169,9 +221,11 @@ Each change restarts the writer (new generation), and the UI shows a banner such
 * **UI tests** launch with `-UITestMode`: `SyntheticFrameSource` in real-time mode at a reduced
   resolution (the CI VM has no hardware encoder), a `FakePhotoLibrary` that writes into
   `Documents/FakePhotoLibrary`, and a fresh `UserDefaults` suite. A hidden-in-production label shows
-  the fake library's clip count so XCUITest can check it.
+  the fake library's clip count so XCUITest can check it. `FakePhotoLibrary` can deny access or fail
+  the next saves; `-UITestPhotosFailOnce` makes the first save fail so a UI test can tap Retry.
 * **Not covered by CI**: `CameraFrameSource`, `AVCaptureEventInteraction` (volume buttons),
-  real thermal behaviour, real Photos and battery drain. See the manual checklist in the README.
+  real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),
+  background-task time after locking the phone, and battery drain. See the manual checklist in the README.
 
 ## 6. Voice trigger (stretch)
 
