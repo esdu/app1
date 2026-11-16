@@ -20,7 +20,8 @@ enum FileProtectionPolicy {
     /// The class for every file and folder RewindCam creates for media.
     static var media: URLFileProtection { .completeUntilFirstUserAuthentication }
 
-    /// The same class as `FileManager` spells it (same raw value; a test checks they agree).
+    /// The same class as `FileManager` attributes spell it (`URLFileProtection` and `FileProtectionType`
+    /// are distinct types with different raw strings).
     static var mediaFileProtectionType: FileProtectionType { .completeUntilFirstUserAuthentication }
 
     /// `FileManager` attributes that request `media`.

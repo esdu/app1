@@ -214,9 +214,10 @@ Photos-owned copies are never touched: once Photos accepts a clip, the app only 
 * `FileProtectionTests` creates every file kind above through the real code paths (ring writes,
   `linkOrCopy`, the copy fallback, `concatenate`, an atomic write committed with `commitPartialClip`,
   `stageForPhotos`) and reads back `URLResourceValues.fileProtection`; wherever the file system reports a
-  class, it must be the media class. **The Simulator does not enforce Data Protection**: a "locked"
-  Simulator still reads every file, and its file system may not report a class at all. Lock behaviour
-  is a device check (README checklist).
+  class, it must be the media class. A strict variant (every file must report the media class) runs only
+  where the file system reports classes at all, i.e. on a device, and shows as skipped otherwise.
+  **The Simulator does not enforce Data Protection**: a "locked" Simulator still reads every file. Lock
+  behaviour is a device check (README checklist).
 
 **Errors.** With this class a protected-data error can only happen before the first unlock, when
 RewindCam can't run. If one happened anyway (for example after a future class change), it surfaces as a
