@@ -10,7 +10,9 @@ concurrency:
   cancel-in-progress: true
 
 permissions:
-  contents: read
+  # write is used only by the last step, to publish UI screenshots to the hidden
+  # ref refs/ci/screenshots (not a branch) on push events.
+  contents: write
 
 jobs:
   test:
@@ -92,3 +94,24 @@ jobs:
           path: artifacts/
           if-no-files-found: warn
           retention-days: 14
+
+      - name: Publish screenshots to refs/ci/screenshots
+        if: always() && github.event_name == 'push'
+        continue-on-error: true
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          set -euo pipefail
+          [ -f artifacts/screenshots/manifest.json ] || { echo "no screenshots"; exit 0; }
+          rm -rf ci-screenshots && python3 scripts/rename-screenshots.py artifacts/screenshots ci-screenshots
+          cp artifacts/test-summary.md ci-screenshots/ 2>/dev/null || true
+          # One orphan commit, force-pushed: the ref always holds only the latest run.
+          export GIT_INDEX_FILE="$RUNNER_TEMP/screenshots.index"
+          rm -f "$GIT_INDEX_FILE"
+          git add -f ci-screenshots
+          TREE=$(git write-tree)
+          COMMIT=$(git commit-tree "$TREE" -m "UI screenshots for ${GITHUB_SHA} (run ${GITHUB_RUN_ID})")
+          git push -f origin "$COMMIT:refs/ci/screenshots"
