@@ -64,7 +64,7 @@ enum FileProtectionPolicy {
     }
 
     /// The class the file system reports for `url`, read fresh (not from a cached resource value).
-    /// nil where the volume does not report Data Protection (e.g. the Simulator).
+    /// nil where the volume does not report Data Protection.
     static func observedProtection(of url: URL) -> URLFileProtection? {
         var fresh = url
         fresh.removeAllCachedResourceValues()

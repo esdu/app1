@@ -4,10 +4,11 @@ import Testing
 
 /// File protection and backup policy (DESIGN.md §2, "File protection and backup").
 ///
-/// The Simulator does not enforce Data Protection, and its file system may not report a class at all.
-/// So these tests check, for every kind of media file the app creates:
-/// - the class the policy requests, and, wherever the file system reports one, that it is that class
-///   (strictly, in a test that runs only where classes are reported, i.e. on a device);
+/// The Simulator records Data Protection classes (CI's iOS 26 Simulator reports them) but does not
+/// enforce them: a locked Simulator still reads every file. So these tests check, for every kind of
+/// media file the app creates:
+/// - the class the policy requests, and that every file reads back with it (strictly wherever the file
+///   system reports classes, which is the case on CI's Simulator and on devices);
 /// - that hard links really are the same file (same inode, so the same class) and a copy is not;
 /// - backup exclusion of the durable folder, and that Caches stays expendable.
 /// Whether a locked phone can still read these files is a device-only check (README checklist).
@@ -31,7 +32,7 @@ struct FileProtectionTests {
         return try #require(attributes[.referenceCount] as? NSNumber).intValue
     }
 
-    /// True where the file system reports a Data Protection class (a device). The Simulator may not.
+    /// True where the file system reports a Data Protection class (devices, and CI's Simulator).
     static var fileSystemReportsProtection: Bool {
         let probe = FileManager.default.temporaryDirectory
             .appendingPathComponent("protection-probe-\(UUID().uuidString)")
@@ -126,11 +127,12 @@ struct FileProtectionTests {
         #expect(try Self.linkCount(files.segment) == 2)
     }
 
-    /// Strict read-back. Runs only where the file system reports Data Protection classes (a device);
-    /// the Simulator doesn't enforce Data Protection, and where it reports no class this shows as skipped.
+    /// Strict read-back. Runs wherever the file system reports Data Protection classes (CI's Simulator
+    /// does; it records classes but doesn't enforce them). Only a file system that reports no class at
+    /// all skips it.
     @Test("Where Data Protection is reported, every media file reads back as 'until first unlock'",
           .enabled(if: FileProtectionTests.fileSystemReportsProtection,
-                   "this file system reports no Data Protection class (Simulator)"))
+                   "this file system reports no Data Protection class"))
     func everyMediaFileReadsBackTheMediaClass() throws {
         let (storage, root) = makeStorage()
         defer { try? FileManager.default.removeItem(at: root) }
