@@ -22,14 +22,20 @@ source, because the Simulator has no camera.*
   is ever stored (see the [disk math](DESIGN.md#bounded-disk)).
 - **Save** with a big on-screen button, or the **volume buttons** (`AVCaptureEventInteraction`, iOS 17.2+).
 - **Post-roll**: keep recording 0, 5, 10 or 30 s after the trigger, so the clip covers before *and* after.
-- **Photos** with add-only permission, a confirmation toast and a haptic.
+- **Photos** with add-only permission (asked at launch, not during the first save), a confirmation
+  toast and a haptic.
+- **No lost clips**: a saved clip is kept in the app (Application Support, excluded from backup) until
+  Photos accepts it. If Photos access is denied or the import fails, a banner says so and offers
+  **Retry**, also after a relaunch. Export and import keep running for a while if you lock the phone
+  right after tapping Save (background task).
 - **Quality**: 720p, 1080p, or 4K where the camera supports it; 30 or 60 fps; sound on or off; front or back camera.
 - **Long sessions**: the screen stays awake. A **Dim** overlay drops brightness to 2 % and
   you tap to wake. The app watches thermal state and steps quality down (and tells you) when the
   phone gets hot. Battery level is shown.
 - **Interruptions** (calls, another app taking the camera, backgrounding) pause cleanly and clear
   the buffer, and capture resumes on its own when the app comes back.
-- **Orphan cleanup**: leftover buffer files from a crash or kill are removed on launch.
+- **Orphan cleanup**: leftover buffer files and half-written exports from a crash or kill are removed
+  on launch. Finished clips that didn't reach Photos are kept.
 - **Voice trigger** (optional, off by default): say "save that". Recognition is **on-device
   only** (`requiresOnDeviceRecognition`). The app also measures battery drain per hour so you can
   see what the voice trigger costs.
@@ -56,6 +62,13 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - A Save resolves when the segment containing the tap is complete, about 1 s after the tap
   (plus any post-roll). The clip still ends exactly at the tap.
 - Only one save can be pending at a time. A second tap during post-roll says "Already saving".
+- **Clips that didn't reach Photos** take their full size in the app's storage until a Retry succeeds.
+  There is no in-app way to delete or share them yet; allow Photos access and tap Retry.
+- A save is only safe once its export has finished (a few seconds after the tap, plus post-roll). If
+  iOS kills the app before that (for example after a long time locked), that one clip is lost. If it
+  is killed after Photos accepted a clip but before the app noticed, Retry can add it twice.
+- Background time for finishing a save, the real Photos permission prompt and Photos import errors
+  are not verified on a device yet.
 - The voice trigger is English (en-US) and needs a device that supports on-device recognition.
 - UI tests run the synthetic source at 360×640 (the CI VM has no hardware encoder). Unit tests use
   320×180 at 15 fps so 300 s of footage encodes in seconds.
@@ -82,7 +95,7 @@ You need a Mac with Xcode 26 or newer and an iPhone on iOS 17.2 or newer. A free
    **Settings › Privacy & Security › Developer Mode** and restart when asked.
 4. Choose your iPhone as the run destination and press **Run** (⌘R).
 5. On the phone, allow the developer under **Settings › General › VPN & Device Management** the first time.
-6. Grant Camera and Microphone on first launch. Photos access (add-only) is asked on the first save.
+6. Grant Camera and Microphone on first launch, then Photos (add-only), which is asked right after.
 
 Command-line alternative (after `xcodegen generate`):
 
@@ -109,13 +122,20 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       the "Measured battery drain" row in Settings each time and note both %/h figures.
 - [ ] **Voice trigger**: "save that" saves a clip from about 2 m away; normal chatter doesn't.
 - [ ] **Orphans**: force-quit while recording, relaunch, and the app's storage drops back to about the buffer size.
+- [ ] **Photos denied, then retry**: on a fresh install, choose "Don't Allow" at the Photos prompt. An
+      orange banner explains it. Tap Save: the toast says the clip is kept, and the banner says
+      "1 clip isn't in Photos yet". Force-quit and relaunch: the banner is still there. Allow
+      Photos in Settings › RewindCam › Photos, tap **Retry**: the clip appears in Photos, plays fully,
+      and the banner goes away.
+- [ ] **Lock during save**: with +10 s post-roll, tap Save and lock the phone at once. After 30 s,
+      unlock: the clip is in Photos (or, if not, offered for Retry), never silently gone.
 
 ## Development
 
 - `project.yml` → `xcodegen generate` (never edit the `.pbxproj` by hand).
 - Swift 6 (strict concurrency), SwiftUI, AVFoundation; minimum iOS 17.2.
 - `-UITestMode` launch argument: synthetic camera, fake photo library in `Documents/FakePhotoLibrary`,
-  fresh settings.
+  fresh settings, no kept clips. Add `-UITestPhotosFailOnce` to make the first Photos save fail.
 - CI ([`.github/workflows/ios.yml`](.github/workflows/ios.yml)): newest macOS runner and newest
   Xcode, iPhone simulator picked dynamically, `xcodebuild test`, then the unit tests four more times as a
   flake check. Per-test timeouts are on (180 s default, 300 s maximum), so a hung test fails by name

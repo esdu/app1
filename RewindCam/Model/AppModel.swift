@@ -43,6 +43,13 @@ final class AppModel {
     private(set) var orphansRemoved = 0
     private(set) var isVoiceListening = false
     private(set) var batteryDrain = BatteryDrainMeter()
+    /// Finished clips that haven't reached Photos (kept in `storage.unsavedDirectory`), offered for retry.
+    private(set) var unsavedClips: [UnsavedClip] = []
+    private(set) var isRetryingUnsaved = false
+    /// Why the last attempt to add a clip to Photos failed; cleared by the next success.
+    private(set) var lastPhotosError: String?
+    /// Result of the add-only Photos request made at launch (nil until answered).
+    private(set) var photosAccessGranted: Bool?
 
     let environment: AppEnvironment
     let recorder: RollingRecorder
@@ -52,6 +59,9 @@ final class AppModel {
     @ObservationIgnored private var savedBrightness: CGFloat?
     @ObservationIgnored private var wantsRunning = false
     @ObservationIgnored private var didCleanUp = false
+    @ObservationIgnored private var didRequestPhotosAccess = false
+    /// Kept clips a save is still handing to Photos; hidden from `unsavedClips` so Retry can't race it.
+    @ObservationIgnored private var clipsInFlight: Set<String> = [] // file names
     @ObservationIgnored private var appliedCapture: CaptureConfiguration?
     /// Source → recorder, plus an optional tap for the voice trigger.
     private let fanOut: SampleFanOut
@@ -106,6 +116,15 @@ final class AppModel {
     }
 
     var isVoiceAvailable: Bool { environment.voice?.isAvailable ?? false }
+
+    static let photosDeniedHint = "Photos access is off. Saved clips stay in RewindCam until you allow it "
+        + "in Settings › RewindCam › Photos, then tap Retry."
+
+    /// What to tell the user about Photos, if anything (shown with the unsaved-clips banner).
+    var photosProblem: String? {
+        if let lastPhotosError { return lastPhotosError }
+        return photosAccessGranted == false ? Self.photosDeniedHint : nil
+    }
 
     /// The voice trigger needs the microphone even when sound isn't recorded into clips.
     var captureConfiguration: CaptureConfiguration {
@@ -203,6 +222,15 @@ final class AppModel {
     }
 
     // MARK: Save
+    //
+    // Save path (DESIGN.md §2, "Save path"):
+    //  1. The recorder hard-links the segments into a job folder in Caches/RewindClips.
+    //  2. The clip is exported to UnsavedClips/<name>.partial.mov (Application Support) and renamed
+    //     to .mov once complete. The job folder is then deleted; the .mov is the durable copy.
+    //  3. Photos gets a disposable hard link of the .mov. Only when Photos reports success is the
+    //     .mov deleted. On failure it stays, the user is told, and Retry offers it again, also
+    //     after a relaunch.
+    // The whole save runs inside a background-task assertion.
 
     @discardableResult
     func save(trigger: SaveTrigger = .button) -> Task<Void, Never>? {
@@ -213,26 +241,130 @@ final class AppModel {
         let postRoll = Double(settings.postRollSeconds)
         let ticket = recorder.beginSave(postRoll: postRoll)
         isSaving = true
+        let background = environment.backgroundTasks.begin(name: "Save clip")
         if trigger == .voice { environment.haptics.success() }
         if postRoll > 0, !ticket.isFulfilled {
             showToast("Saving… recording \(settings.postRollSeconds) s more")
         }
-        let library = environment.photoLibrary
         return Task {
-            do {
-                let bundle = try await ticket.bundle()
-                defer { bundle.discard() }
-                let clip = try await ClipExporter.export(bundle)
-                try await library.saveVideo(at: clip.url)
-                savedClipCount += 1
-                environment.haptics.success()
-                showToast("Saved \(Int(clip.duration.rounded())) s clip to Photos")
-            } catch {
-                environment.haptics.failure()
-                showToast(error.localizedDescription, isError: true)
-            }
+            await exportAndAddToPhotos(ticket)
             isSaving = false
             refreshStatus()
+            environment.backgroundTasks.end(background)
+        }
+    }
+
+    /// Adds every unsaved clip to Photos, oldest first, stopping at the first failure.
+    @discardableResult
+    func retryUnsavedClips() -> Task<Void, Never>? {
+        let clips = unsavedClips
+        guard !isRetryingUnsaved, !clips.isEmpty else { return nil }
+        isRetryingUnsaved = true
+        let background = environment.backgroundTasks.begin(name: "Retry unsaved clips")
+        return Task {
+            var added = 0
+            var failure: Error?
+            for clip in clips {
+                do {
+                    try await addToPhotos(clip)
+                    added += 1
+                } catch {
+                    failure = error
+                    break
+                }
+            }
+            savedClipCount += added
+            reloadUnsavedClips()
+            if let failure {
+                photosFailed(failure)
+            } else {
+                lastPhotosError = nil
+                photosAccessGranted = true
+                environment.haptics.success()
+                showToast(added == 1 ? "Saved 1 clip to Photos" : "Saved \(added) clips to Photos")
+            }
+            isRetryingUnsaved = false
+            refreshStatus()
+            environment.backgroundTasks.end(background)
+        }
+    }
+
+    private func exportAndAddToPhotos(_ ticket: SaveTicket) async {
+        let exported: (clip: UnsavedClip, duration: Double)
+        do {
+            exported = try await exportDurably(ticket)
+        } catch {
+            environment.haptics.failure()
+            showToast(error.localizedDescription, isError: true)
+            return
+        }
+        let clip = exported.clip
+        clipsInFlight.insert(clip.name)
+        defer {
+            clipsInFlight.remove(clip.name)
+            reloadUnsavedClips()
+        }
+        do {
+            try await addToPhotos(clip)
+            savedClipCount += 1
+            lastPhotosError = nil
+            environment.haptics.success()
+            showToast("Saved \(Int(exported.duration.rounded())) s clip to Photos")
+        } catch {
+            photosFailed(error)
+        }
+    }
+
+    /// Waits for the segments, exports to `<name>.partial.mov` in the unsaved-clips folder and renames
+    /// it to `.mov` only once the export is complete. The job folder in Caches is always discarded.
+    private func exportDurably(_ ticket: SaveTicket) async throws -> (clip: UnsavedClip, duration: Double) {
+        let storage = environment.storage
+        let bundle = try await ticket.bundle()
+        defer { bundle.discard() }
+        let partial = try storage.partialClipURL(baseName: ClipExporter.defaultBaseName())
+        do {
+            let output = try await ClipExporter.export(bundle, to: partial)
+            let clip = try storage.commitPartialClip(output.url)
+            return (clip, output.duration)
+        } catch {
+            try? FileManager.default.removeItem(at: partial)
+            throw error
+        }
+    }
+
+    /// Hands Photos a hard link of the kept clip, so the kept copy survives whatever Photos does with
+    /// the file on failure. The kept copy is deleted only after Photos reports success.
+    private func addToPhotos(_ clip: UnsavedClip) async throws {
+        let storage = environment.storage
+        let library = environment.photoLibrary
+        let staged = try storage.stageForPhotos(clip)
+        defer { storage.discardStaging(staged) }
+        try await library.saveVideo(at: staged)
+        storage.removeUnsavedClip(clip)
+    }
+
+    private func photosFailed(_ error: Error) {
+        if let photosError = error as? PhotoLibraryError, case .accessDenied = photosError {
+            photosAccessGranted = false
+        }
+        lastPhotosError = error.localizedDescription
+        environment.haptics.failure()
+        showToast("Not added to Photos. The clip is kept in RewindCam — tap Retry.", isError: true)
+    }
+
+    private func reloadUnsavedClips() {
+        unsavedClips = environment.storage.unsavedClips().filter { !clipsInFlight.contains($0.name) }
+    }
+
+    /// Asks for add-only Photos access once per launch, right after the camera starts, so the prompt
+    /// is answered before the first save. Not awaited by the pipeline: a pending prompt can't stall
+    /// start/stop. A denial costs nothing: clips are kept until access is allowed.
+    private func requestPhotosAccessOnce() {
+        guard !didRequestPhotosAccess else { return }
+        didRequestPhotosAccess = true
+        let library = environment.photoLibrary
+        Task {
+            photosAccessGranted = await library.requestAddAccess()
         }
     }
 
@@ -276,8 +408,10 @@ final class AppModel {
 
     private func bringUp() async {
         if !didCleanUp {
+            // Removes the old buffer, job folders and partial exports; finished clips are kept.
             orphansRemoved = environment.storage.removeOrphans()
             didCleanUp = true
+            reloadUnsavedClips()
         }
         guard wantsRunning else { return }
         phase = .starting
@@ -292,6 +426,7 @@ final class AppModel {
             startStatusLoop()
             startVoiceIfNeeded()
             batteryDrain.reset(configuration: measuredConfiguration)
+            requestPhotosAccessOnce()
         } catch {
             appliedCapture = nil
             phase = .failed(error.localizedDescription)

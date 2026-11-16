@@ -162,7 +162,58 @@ private struct Banners: View {
             if let error = model.status.lastError {
                 Banner(icon: "exclamationmark.circle", text: error, tint: .red)
             }
+            if !model.unsavedClips.isEmpty {
+                UnsavedClipsBanner()
+            } else if model.photosAccessGranted == false {
+                Banner(icon: "photo.badge.exclamationmark", text: AppModel.photosDeniedHint, tint: .orange)
+                    .accessibilityIdentifier("photosDeniedBanner")
+            }
         }
+    }
+}
+
+/// Clips that were exported but haven't reached Photos (denied, failed, or interrupted). Kept on disk
+/// until Retry succeeds.
+private struct UnsavedClipsBanner: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let count = model.unsavedClips.count
+        HStack(spacing: 10) {
+            Image(systemName: "tray.and.arrow.up.fill")
+            VStack(alignment: .leading, spacing: 2) {
+                Text(count == 1 ? "1 clip isn't in Photos yet." : "\(count) clips aren't in Photos yet.")
+                    .fontWeight(.semibold)
+                if let problem = model.photosProblem {
+                    Text(problem)
+                        .font(.caption)
+                        .opacity(0.9)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Button {
+                model.retryUnsavedClips()
+            } label: {
+                if model.isRetryingUnsaved {
+                    ProgressView().tint(.white)
+                } else {
+                    Text("Retry").fontWeight(.bold)
+                }
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.orange)
+            .controlSize(.small)
+            .disabled(model.isRetryingUnsaved)
+            .accessibilityLabel("Retry saving to Photos")
+            .accessibilityIdentifier("retryUnsavedButton")
+        }
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(.white)
+        .padding(10)
+        .background(Color.orange.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.8), lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("unsavedBanner")
     }
 }
 

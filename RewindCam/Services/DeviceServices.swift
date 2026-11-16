@@ -117,3 +117,68 @@ final class FakeHaptics: Haptics {
     func success() { successes += 1 }
     func failure() { failures += 1 }
 }
+
+/// Handle for one background-task assertion. Ending it twice is harmless.
+struct BackgroundTaskToken: Hashable, Sendable {
+    let id: Int
+}
+
+/// Asks iOS for extra time to finish work (export + Photos save) after the app leaves the screen.
+/// Live: `UIApplication.beginBackgroundTask`; tests: `FakeBackgroundTasks` counts begin/end pairs.
+@MainActor
+protocol BackgroundTasks: AnyObject {
+    func begin(name: String) -> BackgroundTaskToken
+    func end(_ token: BackgroundTaskToken)
+}
+
+@MainActor
+final class SystemBackgroundTasks: BackgroundTasks {
+    private var identifiers: [BackgroundTaskToken: UIBackgroundTaskIdentifier] = [:]
+    private var nextID = 0
+
+    func begin(name: String) -> BackgroundTaskToken {
+        nextID += 1
+        let token = BackgroundTaskToken(id: nextID)
+        // If time runs out, iOS requires the assertion to be ended before the handler returns.
+        // The work itself carries on until the app is suspended; a clip that was already renamed
+        // to `.mov` survives that (see DESIGN.md §2, "Save path").
+        let identifier = UIApplication.shared.beginBackgroundTask(withName: name) { [weak self] in
+            MainActor.assumeIsolated { self?.end(token) }
+        }
+        if identifier != .invalid {
+            identifiers[token] = identifier
+        }
+        return token
+    }
+
+    func end(_ token: BackgroundTaskToken) {
+        guard let identifier = identifiers.removeValue(forKey: token) else { return }
+        UIApplication.shared.endBackgroundTask(identifier)
+    }
+}
+
+@MainActor
+final class FakeBackgroundTasks: BackgroundTasks {
+    private(set) var begun = 0
+    private(set) var ended = 0
+    private(set) var names: [String] = []
+    private var active: Set<BackgroundTaskToken> = []
+    private var nextID = 0
+
+    /// Assertions begun and not yet ended.
+    var activeCount: Int { active.count }
+
+    func begin(name: String) -> BackgroundTaskToken {
+        nextID += 1
+        let token = BackgroundTaskToken(id: nextID)
+        begun += 1
+        names.append(name)
+        active.insert(token)
+        return token
+    }
+
+    /// Counts only the first end of each token, like the live implementation.
+    func end(_ token: BackgroundTaskToken) {
+        if active.remove(token) != nil { ended += 1 }
+    }
+}

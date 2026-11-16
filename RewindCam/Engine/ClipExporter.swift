@@ -22,7 +22,15 @@ enum ClipExporter {
         }
     }
 
+    /// Exports into the bundle's own job folder (tests; the folder is deleted by `discard()`).
     static func export(_ bundle: SegmentBundle, fileName: String = defaultFileName()) async throws -> ExportedClip {
+        try await export(bundle, to: bundle.directory.appendingPathComponent(fileName))
+    }
+
+    /// Exports to `output`, which may be outside the bundle's folder: the app writes
+    /// `UnsavedClips/<name>.partial.mov` and renames it once this returns (DESIGN.md §2, "Save path").
+    /// Temporary files are still written inside `bundle.directory`.
+    static func export(_ bundle: SegmentBundle, to output: URL) async throws -> ExportedClip {
         guard let last = bundle.segments.last, bundle.clipDuration > 0 else { throw ExportError.empty }
         let fm = FileManager.default
 
@@ -65,18 +73,20 @@ enum ClipExporter {
         }
 
         // 4. Passthrough export to QuickTime.
-        let output = bundle.directory.appendingPathComponent(fileName)
         try? fm.removeItem(at: output)
         try await runPassthroughExport(composition, to: output)
         let duration = try await AVURLAsset(url: output).load(.duration).seconds
         return ExportedClip(url: output, duration: duration)
     }
 
-    static func defaultFileName() -> String {
+    static func defaultFileName() -> String { defaultBaseName() + ".mov" }
+
+    /// `RewindCam_<date>_<time>`, without an extension.
+    static func defaultBaseName(at date: Date = Date()) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd'_'HH-mm-ss"
-        return "RewindCam_\(f.string(from: Date())).mov"
+        return "RewindCam_\(f.string(from: date))"
     }
 
     static func concatenate(_ parts: [URL], into destination: URL) throws {

@@ -17,11 +17,15 @@ final class ModelHarness {
     let voice = FakeVoiceTrigger()
     let clock = FakeWallClock()
     let battery = FakeBatteryMonitor(level: 0.8)
+    let backgroundTasks = FakeBackgroundTasks()
 
+    /// A "relaunch" is a second `makeModel()` on the same harness: same storage folders, same fake Photos.
     init(thermal: ThermalLevel = .nominal, suiteName: String = "RewindCamTests-\(UUID().uuidString)") {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("RewindCamModel-\(UUID().uuidString)", isDirectory: true)
-        storage = FileBufferStorage(root: root)
+        // Separate volatile (Caches) and durable (Application Support) roots, like the app.
+        storage = FileBufferStorage(root: root.appendingPathComponent("Caches", isDirectory: true),
+                                    durableRoot: root.appendingPathComponent("ApplicationSupport", isDirectory: true))
         library = FakePhotoLibrary(directory: root.appendingPathComponent("FakePhotoLibrary", isDirectory: true))
         source = SyntheticFrameSource(format: .init(width: 320, height: 180, frameRate: 15, audioEnabled: true),
                                       mode: .manual)
@@ -36,7 +40,7 @@ final class ModelHarness {
             settingsStore: UserDefaultsSettingsStore(defaults: defaults), thermal: thermal,
             battery: battery, screen: screen, haptics: haptics,
             realTime: false, fakeLibrary: library, supportsCaptureButtons: false,
-            voice: voice, clock: clock)
+            backgroundTasks: backgroundTasks, voice: voice, clock: clock)
     }
 
     func makeModel() -> AppModel { AppModel(environment: makeEnvironment()) }
