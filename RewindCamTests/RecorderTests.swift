@@ -176,13 +176,18 @@ struct RecorderTests {
         let ticket = h.recorder.beginSave(postRoll: 0)
         await #expect(throws: RecorderError.nothingBuffered) { try await ticket.bundle() }
 
-        // The fix: configure the writer without audio, as AppModel does when the mic isn't captured.
+        // Control, same mode and same frames: without the audio input the writer emits segments. So the
+        // stall above is caused by the unfed audio input alone.
         var config = h.recorder.currentConfiguration
         config.audioEnabled = false
-        config.realTime = false
         config.appendWaitLimit = 10
         h.recorder.reconfigure(config)
+        let controlStart = h.now
         h.source.generate(seconds: 6)
+        try await h.waitForSegments(through: controlStart + 2)
+        guard !realTime else { return } // a real-time burst drops frames, so only count segments there
+
+        // The fix as AppModel applies it: a writer without audio yields a clean, playable clip.
         try await h.waitForSegments(through: h.now - 2)
         #expect(h.recorder.status().bufferedSeconds >= 3)
         let clip = try await h.saveClip(thenRecord: 2)
