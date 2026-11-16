@@ -4,6 +4,11 @@ options:
   deploymentTarget:
     iOS: "17.2"
   createIntermediateGroups: true
+  fileTypes:
+    # Privacy manifest must be copied into the app bundle (Copy Bundle Resources).
+    # XcodeGen's default for .xcprivacy has changed between releases, so pin it.
+    xcprivacy:
+      buildPhase: resources
   developmentLanguage: en
 settings:
   base:

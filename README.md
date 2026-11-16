@@ -122,6 +122,9 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
   instead of running into the 30-minute job timeout. The `.xcresult` bundle, screenshots, a summary,
   `xcodebuild.log`, `stress.log` and the app's simulator log (`simulator.log`) are always uploaded.
   Screenshots are also published to the hidden git ref `refs/ci/screenshots` (`git fetch origin refs/ci/screenshots`).
+- Privacy manifest ([`RewindCam/Resources/PrivacyInfo.xcprivacy`](RewindCam/Resources/PrivacyInfo.xcprivacy)):
+  no tracking, no collected data; declares the required-reason APIs the app uses (`UserDefaults`
+  `CA92.1`, disk space `E174.1`). A unit test checks it is in the built app bundle.
 
 ## Task checklist
 
