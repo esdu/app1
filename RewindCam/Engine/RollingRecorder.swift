@@ -90,6 +90,9 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         /// `false` in unit tests: appends wait for the encoder instead of dropping frames.
         var realTime: Bool = true
         var segmentInterval: Double = 1
+        /// Non-real-time only: how long an append waits for the input to become ready before the
+        /// sample is dropped. Tests that expect a stalled writer lower it.
+        var appendWaitLimit: Double = 10
 
         var byteCap: Int64 {
             BufferMath.ringCapBytes(videoBitrate: videoBitrate, audioEnabled: audioEnabled, bufferSeconds: bufferDuration)
@@ -366,7 +369,7 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     private func waitUntilReady(_ input: AVAssetWriterInput, writer: AVAssetWriter) -> Bool {
         if input.isReadyForMoreMediaData { return true }
         guard !configuration.realTime else { return false }
-        let deadline = Date().addingTimeInterval(10)
+        let deadline = Date().addingTimeInterval(configuration.appendWaitLimit)
         while !input.isReadyForMoreMediaData {
             if writer.status != .writing || Date() > deadline { return false }
             Thread.sleep(forTimeInterval: 0.001)
@@ -419,6 +422,8 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         }
         writer.add(videoInput)
 
+        // Only when the source really delivers audio (`ActiveCapture.audioCaptured`): an audio input
+        // that never gets samples holds back the writer's segments (issue #3, RecorderTests).
         var audioInput: AVAssetWriterInput?
         if configuration.audioEnabled {
             var layout = AudioChannelLayout()

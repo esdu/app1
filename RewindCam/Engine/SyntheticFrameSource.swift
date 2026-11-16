@@ -48,6 +48,10 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     private var audioCount: Int64 = 0
     private var framesDrawn: Int64 = 0
     private var font: CTFont?
+    /// Set by `start(_:)`. True before any start, so a source fed straight into a recorder (the
+    /// recorder tests) emits audio whenever its format has it.
+    private var emitsAudio = true
+    private var audioFailure: AudioUnavailableReason?
 
     static let audioSampleRate: Int32 = 48_000
     static let audioChunk = 1_024
@@ -71,22 +75,34 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
 
     func supportedResolutions(for camera: CameraPosition) -> [VideoResolution] { VideoResolution.allCases }
 
-    func start(_ configuration: CaptureConfiguration) async throws {
-        queue.sync {
+    /// Like `CameraFrameSource`, audio is delivered only when the configuration asks for it and the
+    /// (simulated) microphone is usable; the result says which.
+    func start(_ configuration: CaptureConfiguration) async throws -> ActiveCapture {
+        queue.sync { () -> ActiveCapture in
             if followsConfiguration {
                 format.frameRate = configuration.preset.frameRate.rawValue
                 format.audioEnabled = configuration.audioEnabled
             }
+            let capture = activeCapture(for: configuration)
+            emitsAudio = capture.audioCaptured
             timelineStarted = false
-            guard mode == .realTime else { return }
-            timer?.cancel()
-            let t = DispatchSource.makeTimerSource(queue: queue)
-            let interval = 1.0 / Double(format.frameRate)
-            t.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(2))
-            t.setEventHandler { [weak self] in self?.tick() }
-            timer = t
-            t.resume()
+            if mode == .realTime {
+                timer?.cancel()
+                let t = DispatchSource.makeTimerSource(queue: queue)
+                let interval = 1.0 / Double(format.frameRate)
+                t.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(2))
+                t.setEventHandler { [weak self] in self?.tick() }
+                timer = t
+                t.resume()
+            }
+            return capture
         }
+    }
+
+    /// Simulates a denied or broken microphone (nil: usable). Applies from the next `start(_:)`, like a
+    /// permission change on a device. Tests and `-UITestDenyMicrophone` use it.
+    func setAudioUnavailable(_ reason: AudioUnavailableReason?) {
+        queue.sync { audioFailure = reason }
     }
 
     func stop() async {
@@ -135,6 +151,15 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
         audioBase + CMTime(value: audioCount * Int64(Self.audioChunk), timescale: Self.audioSampleRate)
     }
 
+    private func activeCapture(for configuration: CaptureConfiguration) -> ActiveCapture {
+        guard configuration.audioEnabled else { return ActiveCapture(audioCaptured: false, audioUnavailable: nil) }
+        if let audioFailure { return ActiveCapture(audioCaptured: false, audioUnavailable: audioFailure) }
+        guard format.audioEnabled else {
+            return ActiveCapture(audioCaptured: false, audioUnavailable: .microphoneUnavailable("this source has no audio"))
+        }
+        return ActiveCapture(audioCaptured: true, audioUnavailable: nil)
+    }
+
     private func startTimelineIfNeeded() {
         guard !timelineStarted else { return }
         timelineStarted = true
@@ -166,7 +191,7 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
         while true {
             let v = nextVideoTime
             let a = nextAudioTime
-            let audioDue = format.audioEnabled && a < end
+            let audioDue = format.audioEnabled && emitsAudio && a < end
             let videoDue = v < end
             if !audioDue && !videoDue { break }
             if videoDue && (!audioDue || v <= a) {

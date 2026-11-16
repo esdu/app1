@@ -20,6 +20,9 @@ struct AppEnvironment {
     var supportsCaptureButtons: Bool
     /// Keeps a save (export + Photos) running when the user locks the phone or leaves the app.
     var backgroundTasks: BackgroundTasks
+    /// "Open Settings" buttons (microphone notice; camera denied in #8). Real in `-UITestMode` too, so
+    /// a UI test can see the Settings app come forward.
+    var appSettings: AppSettingsOpener
     /// On-device "save that" recogniser (nil where unsupported, e.g. UI tests).
     var voice: VoiceTrigger? = nil
     var clock: WallClock = SystemWallClock()
@@ -27,6 +30,8 @@ struct AppEnvironment {
     static let uiTestArgument = "-UITestMode"
     /// With `-UITestMode`: the fake Photos library fails the first save, so the UI test can retry it.
     static let uiTestPhotosFailOnceArgument = "-UITestPhotosFailOnce"
+    /// With `-UITestMode`: the synthetic source acts as if microphone access were denied.
+    static let uiTestDenyMicrophoneArgument = "-UITestDenyMicrophone"
 
     static func current(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         arguments.contains(uiTestArgument) ? uiTest(arguments: arguments) : live()
@@ -47,6 +52,7 @@ struct AppEnvironment {
             fakeLibrary: nil,
             supportsCaptureButtons: true,
             backgroundTasks: SystemBackgroundTasks(),
+            appSettings: SystemAppSettingsOpener(),
             voice: SpeechVoiceTrigger()
         )
     }
@@ -63,9 +69,13 @@ struct AppEnvironment {
         }
         let storage = FileBufferStorage.standard
         try? FileManager.default.removeItem(at: storage.unsavedDirectory)
+        let source = SyntheticFrameSource(format: .uiTest, mode: .realTime, followsConfiguration: true)
+        if arguments.contains(uiTestDenyMicrophoneArgument) {
+            source.setAudioUnavailable(.microphoneDenied)
+        }
         return AppEnvironment(
             isUITest: true,
-            source: SyntheticFrameSource(format: .uiTest, mode: .realTime, followsConfiguration: true),
+            source: source,
             photoLibrary: fake,
             storage: storage,
             settingsStore: UserDefaultsSettingsStore(defaults: defaults),
@@ -76,7 +86,8 @@ struct AppEnvironment {
             realTime: true,
             fakeLibrary: fake,
             supportsCaptureButtons: false,
-            backgroundTasks: SystemBackgroundTasks()
+            backgroundTasks: SystemBackgroundTasks(),
+            appSettings: SystemAppSettingsOpener()
         )
     }
 }

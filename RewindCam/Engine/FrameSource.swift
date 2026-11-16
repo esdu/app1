@@ -33,10 +33,31 @@ enum FrameSourceEvent: Equatable, Sendable {
     case interruptionEnded
 }
 
+/// What the caller asks a source to capture. `audioEnabled` is a request: the microphone may be
+/// denied or unusable, and `FrameSource.start` reports what was actually set up (`ActiveCapture`).
 struct CaptureConfiguration: Equatable, Sendable {
     var preset: QualityPreset
     var audioEnabled: Bool
     var camera: CameraPosition
+}
+
+/// Why audio was requested but isn't captured.
+enum AudioUnavailableReason: Equatable, Sendable {
+    /// The user denied microphone access (or it is restricted). Fixable in the Settings app.
+    case microphoneDenied
+    /// No microphone, or its input or output couldn't be added to the capture session.
+    case microphoneUnavailable(String)
+}
+
+/// What a started source actually delivers to its sink (issue #3).
+///
+/// The recorder's writer gets an audio input only when `audioCaptured` is true: an input that is
+/// never fed stalls the segmenting writer (see `RecorderTests.writerAudioInputWithoutSamples`).
+struct ActiveCapture: Equatable, Sendable {
+    /// True only if audio sample buffers will be passed to the sink.
+    var audioCaptured: Bool
+    /// Set when audio was requested but isn't captured; nil when it is captured or wasn't requested.
+    var audioUnavailable: AudioUnavailableReason?
 }
 
 enum FrameSourceError: LocalizedError, Equatable {
@@ -58,7 +79,10 @@ enum FrameSourceError: LocalizedError, Equatable {
 protocol FrameSource: AnyObject, Sendable {
     func setSink(_ sink: SampleSink?)
     func setEventHandler(_ handler: (@Sendable (FrameSourceEvent) -> Void)?)
-    func start(_ configuration: CaptureConfiguration) async throws
+    /// Starts (or reconfigures and restarts) capture. Throws only when video can't be captured
+    /// (`FrameSourceError`). Audio problems never throw: they are reported in the result, and the
+    /// caller builds the recorder configuration from the result, never from what it requested.
+    func start(_ configuration: CaptureConfiguration) async throws -> ActiveCapture
     func stop() async
     /// Resolutions this source can deliver for the given camera.
     func supportedResolutions(for camera: CameraPosition) -> [VideoResolution]

@@ -73,6 +73,42 @@ final class RewindCamUITests: XCTestCase {
         screenshot(app, "unsaved-2-after-retry")
     }
 
+    /// Microphone denied with "Record sound" on (the default): recording and saving still work, a
+    /// banner says sound is off, and its Open Settings button opens the Settings app.
+    @MainActor
+    func testMicrophoneDeniedShowsNoticeAndSavesStillWork() {
+        let app = launch(extraArguments: ["-UITestDenyMicrophone"])
+        let banner = element(app, "microphoneBanner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "no microphone banner")
+        let openSettings = banner.buttons["openSettingsButton"]
+        XCTAssertTrue(openSettings.exists, "no Open Settings button in the microphone banner")
+        Thread.sleep(forTimeInterval: 5) // let the synthetic buffer fill
+        screenshot(app, "mic-denied-1-banner")
+
+        app.buttons["saveButton"].tap()
+        let toast = element(app, "toast")
+        XCTAssertTrue(toast.waitForExistence(timeout: 20), "no confirmation toast")
+        XCTAssertTrue(toast.label.contains("Saved"), "toast says: \(toast.label)")
+        let count = element(app, "fakeLibraryCount")
+        let oneClip = NSPredicate(format: "label == %@", "Fake library: 1")
+        wait(for: [expectation(for: oneClip, evaluatedWith: count)], timeout: 10)
+        screenshot(app, "mic-denied-2-saved")
+
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(element(app, "microphoneSettingsNote").waitForExistence(timeout: 5),
+                      "Settings doesn't say why there's no sound")
+        XCTAssertTrue(app.switches["audioToggle"].exists)
+        XCTAssertEqual(app.switches["audioToggle"].value as? String, "1", "Record sound must stay on")
+        screenshot(app, "mic-denied-3-settings")
+        app.buttons["doneButton"].tap()
+
+        XCTAssertTrue(openSettings.waitForExistence(timeout: 5))
+        openSettings.tap()
+        let settingsApp = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        XCTAssertTrue(settingsApp.wait(for: .runningForeground, timeout: 15), "the Settings app did not open")
+    }
+
     @MainActor
     func testChangeBufferTo60Seconds() {
         let app = launch()

@@ -150,6 +150,47 @@ struct RecorderTests {
         #expect(files.count == status.segmentCount)
     }
 
+    /// Issue #3 regression: the writer has an AAC input but the source delivers only video, which is
+    /// what happened when the microphone was denied with "Record sound" on. Pins down what
+    /// AVAssetWriter does then, and so why `RollingRecorder.Configuration.audioEnabled` must follow
+    /// what the source captures (`ActiveCapture.audioCaptured`), not the setting.
+    /// Runs both with real-time inputs (as in the app) and non-real-time ones (as in the other tests).
+    @Test("Writer audio input that is never fed: no segments are emitted and nothing can be saved",
+          arguments: [true, false])
+    func writerAudioInputWithoutSamples(realTime: Bool) async throws {
+        // A short append wait: a stalled non-real-time input would otherwise block each frame for 10 s.
+        let h = RecorderHarness(buffer: 30, audio: true, sourceAudio: false, realTime: realTime, appendWaitLimit: 0.05)
+        h.source.generate(seconds: 6)
+        // A healthy writer delivers segments within milliseconds; give this one far longer.
+        let deadline = Date().addingTimeInterval(3)
+        while h.recorder.status().lastSegmentEnd == nil, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let (status, files, _) = h.recorder.diskSnapshot()
+        let observed = "realTime \(realTime): segments \(status.segmentCount), buffered \(status.bufferedSeconds) s, "
+            + "last segment end \(String(describing: status.lastSegmentEnd)), "
+            + "last video appended \(String(describing: status.latestMediaTime)), error \(String(describing: status.lastError))"
+        #expect(status.segmentCount == 0, "\(observed)")
+        #expect(files.isEmpty, "\(observed)")
+        #expect(status.bufferedSeconds == 0, "\(observed)")
+        let ticket = h.recorder.beginSave(postRoll: 0)
+        await #expect(throws: RecorderError.nothingBuffered) { try await ticket.bundle() }
+
+        // The fix: configure the writer without audio, as AppModel does when the mic isn't captured.
+        var config = h.recorder.currentConfiguration
+        config.audioEnabled = false
+        config.realTime = false
+        config.appendWaitLimit = 10
+        h.recorder.reconfigure(config)
+        h.source.generate(seconds: 6)
+        try await h.waitForSegments(through: h.now - 2)
+        #expect(h.recorder.status().bufferedSeconds >= 3)
+        let clip = try await h.saveClip(thenRecord: 2)
+        let info = try await inspectClip(clip.url)
+        #expect(info.duration >= 3, "duration \(info.duration)")
+        expectHealthyClip(info, frameRate: h.frameRate, audio: false)
+    }
+
     @Test("Only one save can be pending at a time")
     func secondSaveWhilePendingIsRejected() async throws {
         let h = RecorderHarness(buffer: 15, audio: false)

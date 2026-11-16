@@ -118,6 +118,28 @@ final class FakeHaptics: Haptics {
     func failure() { failures += 1 }
 }
 
+/// Opens RewindCam's own page in the Settings app, where the user can allow the camera, microphone or
+/// Photos. Reached through `AppModel.openAppSettings()`, which every "Open Settings" button calls
+/// (`NoticeBanner`). Live: `UIApplication.openSettingsURLString`; tests: `FakeAppSettingsOpener`.
+@MainActor
+protocol AppSettingsOpener: AnyObject {
+    func openAppSettings()
+}
+
+@MainActor
+final class SystemAppSettingsOpener: AppSettingsOpener {
+    func openAppSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url, options: [:], completionHandler: nil)
+    }
+}
+
+@MainActor
+final class FakeAppSettingsOpener: AppSettingsOpener {
+    private(set) var openCount = 0
+    func openAppSettings() { openCount += 1 }
+}
+
 /// Handle for one background-task assertion. Ending it twice is harmless.
 struct BackgroundTaskToken: Hashable, Sendable {
     let id: Int
