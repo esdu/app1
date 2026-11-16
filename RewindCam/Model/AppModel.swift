@@ -756,9 +756,18 @@ final class AppModel {
         }
     }
 
+    /// One restart attempt for `reason`; true if the source runs afterwards. The per-reason seam: a
+    /// frame stall (#9) needs more than `resumeRunning()` (a source that "runs" without delivering).
+    private func restartSource(for reason: CaptureRecoveryReason) async -> Bool {
+        switch reason {
+        case .runtimeError, .sourceStopped:
+            return await environment.source.resumeRunning()
+        }
+    }
+
     private func attemptRecovery(_ id: Int) async {
-        guard recovery?.id == id, automaticCaptureAllowed else { return }
-        let running = await environment.source.resumeRunning()
+        guard let current = recovery, current.id == id, automaticCaptureAllowed else { return }
+        let running = await restartSource(for: current.reason)
         // A stop, a new start or an ordinary interruption may have superseded this recovery meanwhile.
         guard recovery?.id == id, automaticCaptureAllowed else { return }
         if running {
