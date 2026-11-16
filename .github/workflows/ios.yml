@@ -1,0 +1,94 @@
+name: iOS
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build & test (Simulator)
+    # Newest GitHub-hosted macOS image (see actions/runner-images README).
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      RESULT_BUNDLE: TestResults.xcresult
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Select newest Xcode
+        run: |
+          set -euo pipefail
+          XCODE=$(ls -d /Applications/Xcode_*.app | grep -viE 'beta|_rc|release_candidate' | sort -V | tail -1)
+          echo "Selecting $XCODE"
+          sudo xcode-select -s "$XCODE/Contents/Developer"
+          xcodebuild -version
+          xcrun simctl list devices available
+
+      - name: Generate Xcode project
+        run: |
+          set -euo pipefail
+          brew install xcodegen
+          xcodegen generate
+
+      - name: Pick and boot simulator
+        id: sim
+        run: |
+          set -euo pipefail
+          read -r UDID NAME RUNTIME < <(xcrun simctl list devices available -j | python3 scripts/pick-simulator.py)
+          echo "Using $NAME ($RUNTIME) $UDID"
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: Test
+        run: |
+          set -o pipefail
+          xcodebuild test \
+            -project RewindCam.xcodeproj \
+            -scheme RewindCam \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -resultBundlePath "$RESULT_BUNDLE" \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee xcodebuild.log | { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
+
+      - name: Export screenshots and summary
+        if: always()
+        run: |
+          mkdir -p artifacts/screenshots
+          if [ -d "$RESULT_BUNDLE" ]; then
+            xcrun xcresulttool export attachments --path "$RESULT_BUNDLE" --output-path artifacts/screenshots || true
+            xcrun xcresulttool get test-results summary --path "$RESULT_BUNDLE" > artifacts/summary.json || true
+            xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" > artifacts/tests.json || true
+          fi
+          python3 scripts/summarize-xcresult.py artifacts/summary.json artifacts/tests.json > artifacts/test-summary.md || true
+          cat artifacts/test-summary.md >> "$GITHUB_STEP_SUMMARY" || true
+          cat artifacts/test-summary.md || true
+          cp xcodebuild.log artifacts/ 2>/dev/null || true
+          ls -la artifacts/screenshots | head -50
+
+      - name: Upload result bundle
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: TestResults-xcresult
+          path: ${{ env.RESULT_BUNDLE }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload screenshots, logs and summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-screenshots-and-logs
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 14

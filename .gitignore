@@ -1,0 +1,9 @@
+*.xcodeproj/
+*.xcworkspace/
+DerivedData/
+build/
+*.xcresult
+TestResults*/
+.DS_Store
+xcuserdata/
+screenshots-tmp/
