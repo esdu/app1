@@ -392,3 +392,15 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   unplugged, and Settings shows `%/h` labelled with the active configuration
   (e.g. "1080p 30 fps, voice on"). The meter restarts on any configuration change, so the
   on and off figures can be compared directly on a device.
+
+## 7. Clip library (assessed, not built)
+
+Issue #16 asked whether to add a private in-app clip library on top of #1's durable store. Decision:
+**no permanent library**; production stays Photos-first and deletes a clip once Photos accepts it.
+The recommended follow-up is a small "Not in Photos yet" sheet (play, share, add to Photos, confirmed
+delete) over the same `UnsavedClips/` records; an opt-in per-clip "Keep locally" is feasible but
+deferred, and a local-first library is rejected (unbounded storage competing with the buffer). The
+comparison of ownership policies, storage, file protection, privacy, risks, evidence and the proposed
+follow-up text are in [docs/decisions/clip-library.md](docs/decisions/clip-library.md). The disabled
+prototype (`RewindCam/Library/ClipLibraryPrototype.swift`, not used by the app) and its tests
+(`ClipLibraryPrototypeTests`) check those operations on real clips in temp folders.
