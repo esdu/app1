@@ -117,9 +117,11 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
 - `-UITestMode` launch argument: synthetic camera, fake photo library in `Documents/FakePhotoLibrary`,
   fresh settings.
 - CI ([`.github/workflows/ios.yml`](.github/workflows/ios.yml)): newest macOS runner and newest
-  Xcode, iPhone simulator picked dynamically, `xcodebuild test`. The `.xcresult` bundle, screenshots and a
-  summary are always uploaded. Screenshots are also published to the hidden git ref
-  `refs/ci/screenshots` (`git fetch origin refs/ci/screenshots`).
+  Xcode, iPhone simulator picked dynamically, `xcodebuild test`, then the unit tests four more times as a
+  flake check. Per-test timeouts are on (180 s default, 300 s maximum), so a hung test fails by name
+  instead of running into the 30-minute job timeout. The `.xcresult` bundle, screenshots, a summary,
+  `xcodebuild.log`, `stress.log` and the app's simulator log (`simulator.log`) are always uploaded.
+  Screenshots are also published to the hidden git ref `refs/ci/screenshots` (`git fetch origin refs/ci/screenshots`).
 
 ## Task checklist
 

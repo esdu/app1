@@ -51,6 +51,10 @@ jobs:
           xcrun simctl bootstatus "$UDID" -b
 
       - name: Test
+        # Per-test timeouts: a hung test fails on its own (and is named in the .xcresult)
+        # instead of running into the job timeout. Default 180 s is >= 3x the slowest test
+        # (UI tests ~16-53 s, the 300 s eviction unit test ~9-30 s); no test may ask for more
+        # than 300 s via .timeLimit. Xcode rounds allowances up to whole minutes.
         run: |
           set -o pipefail
           xcodebuild test \
@@ -59,6 +63,9 @@ jobs:
             -destination "id=${{ steps.sim.outputs.udid }}" \
             -resultBundlePath "$RESULT_BUNDLE" \
             -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 180 \
+            -maximum-test-execution-time-allowance 300 \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee xcodebuild.log | { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
 
@@ -75,6 +82,9 @@ jobs:
             -test-iterations 4 -run-tests-until-failure \
             -resultBundlePath StressResults.xcresult \
             -parallel-testing-enabled NO \
+            -test-timeouts-enabled YES \
+            -default-test-execution-time-allowance 180 \
+            -maximum-test-execution-time-allowance 300 \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee stress.log | { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
 
@@ -90,7 +100,10 @@ jobs:
           python3 scripts/summarize-xcresult.py artifacts/summary.json artifacts/tests.json > artifacts/test-summary.md || true
           cat artifacts/test-summary.md >> "$GITHUB_STEP_SUMMARY" || true
           cat artifacts/test-summary.md || true
-          cp xcodebuild.log artifacts/ 2>/dev/null || true
+          cp xcodebuild.log stress.log artifacts/ 2>/dev/null || true
+          # The app's own log (app under UI test and unit-test host) from the simulator.
+          xcrun simctl spawn "${{ steps.sim.outputs.udid }}" log show --last 30m --style compact \
+            --predicate 'process == "RewindCam"' > artifacts/simulator.log 2>&1 || true
           # Crash reports (test host or app): print the crashed thread and keep the .ips files.
           mkdir -p artifacts/crashes
           if [ -d "$RESULT_BUNDLE" ]; then
@@ -102,6 +115,7 @@ jobs:
             python3 scripts/crash-summary.py artifacts/crashes/*.ips | tee artifacts/crashes/summary.txt
           fi
           ls -la artifacts/screenshots | head -50
+          ls -la artifacts
 
       - name: Upload result bundle
         if: always()
