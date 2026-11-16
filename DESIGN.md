@@ -349,7 +349,8 @@ budget is spent the model wakes the screen from Dim, plays the failure haptic an
 `startFailed(.restartFailed(...))`: capture stops, the idle timer is re-enabled and the phase is
 `.failed("The camera stopped (…) and couldn't be restarted.")` with Try Again. Callers today: a
 runtime-error event (`.runtimeError`) and the safety net (`.sourceStopped`). The frame watchdog (#9)
-should add its own reason here rather than a second restart path.
+should add its own reason here, with its restart action in `restartSource(for:)` (a stalled source
+still "runs", so it needs a full tearDown + bringUp), rather than a second restart path.
 
 **Safety net: `AppModel.reconcileCapture()`**, run by `statusTick()` every 0.5 s (the status loop,
 also on `environment.scheduler`). It compares `FrameSource.runState` (`.running`, `.interrupted`,
