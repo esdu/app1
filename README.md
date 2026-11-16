@@ -67,6 +67,11 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - Only one save can be pending at a time. A second tap during post-roll says "Already saving".
 - **Clips that didn't reach Photos** take their full size in the app's storage until a Retry succeeds.
   There is no in-app way to delete or share them yet; allow Photos access and tap Retry.
+- **Clips that didn't reach Photos are not backed up** and don't move to a new or restored phone: they
+  are excluded from iCloud/device backup until Photos has them. All media files use the iOS default
+  Data Protection class ("available after first unlock"), set explicitly so a save can finish while the
+  phone is locked; the stricter "Complete" class would make it fail. See DESIGN.md §2, "File protection
+  and backup". The Simulator doesn't enforce Data Protection, so this is checked on a device only.
 - A save is only safe once its export has finished (a few seconds after the tap, plus post-roll). If
   iOS kills the app before that (for example after a long time locked), that one clip is lost. If it
   is killed after Photos accepted a clip but before the app noticed, Retry can add it twice.
@@ -142,6 +147,10 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       next clip has sound.
 - [ ] **Lock during save**: with +10 s post-roll, tap Save and lock the phone at once. After 30 s,
       unlock: the clip is in Photos (or, if not, offered for Retry), never silently gone.
+- [ ] **Locked export (file protection)**: at 4K60 with a 120 s buffer and +30 s post-roll, record
+      2 min, tap Save and lock the phone at once (passcode set, "Require Passcode: Immediately"). After
+      2 min, unlock: the clip is in Photos or offered for Retry, never "Export failed". Repeat with Photos
+      denied: lock, wait, unlock, relaunch: the kept clip is still offered and Retry adds it, and it plays.
 
 ## Development
 
