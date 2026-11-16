@@ -1,16 +1,127 @@
 # RewindCam
 
-A free, private, offline **pre-record camera** for catching a baby's spontaneous milestones.
-The camera records all the time into a rolling buffer that never grows. When something happens, tap
-**Save** (or press a volume button) and the last *N* seconds land in Photos.
+[![iOS](https://github.com/esdu/app1/actions/workflows/ios.yml/badge.svg?branch=claude/keen-fermat-4r9wgs)](https://github.com/esdu/app1/actions/workflows/ios.yml)
 
-Nothing leaves the phone: no network code, no accounts, no analytics.
+A free, private, offline **pre-record camera** for catching a baby's spontaneous milestones: first
+steps, first words, the laugh you didn't see coming.
 
-See [DESIGN.md](DESIGN.md) for the architecture and the buffer/disk math.
+The camera records all the time into a rolling buffer that never grows. When something happens,
+tap **Save** (or press a volume button, or say "save that") and the last *N* seconds land in Photos.
+Nothing leaves the phone: there is no network code, no accounts and no analytics.
+
+| Recording | Saved | Settings | Dimmed |
+|---|---|---|---|
+| ![Recording](docs/screenshots/save-2-after-5s.png) | ![Saved toast](docs/screenshots/save-3-toast.png) | ![Settings](docs/screenshots/settings-2-open.png) | ![Dim mode](docs/screenshots/dim-2-dimmed.png) |
+
+*Screenshots come from the UI tests in the Simulator. The colour bars are the synthetic test
+source, because the Simulator has no camera.*
+
+## Features
+
+- **Rolling buffer** of 15, 30, 60, 90 or 120 s. Disk use is bounded: only the buffer plus a small margin
+  is ever stored (see the [disk math](DESIGN.md#bounded-disk)).
+- **Save** with a big on-screen button, or the **volume buttons** (`AVCaptureEventInteraction`, iOS 17.2+).
+- **Post-roll**: keep recording 0, 5, 10 or 30 s after the trigger, so the clip covers before *and* after.
+- **Photos** with add-only permission, a confirmation toast and a haptic.
+- **Quality**: 720p, 1080p, or 4K where the camera supports it; 30 or 60 fps; sound on or off; front or back camera.
+- **Long sessions**: the screen stays awake. A **Dim** overlay drops brightness to 2 % and
+  you tap to wake. The app watches thermal state and steps quality down (and tells you) when the
+  phone gets hot. Battery level is shown.
+- **Interruptions** (calls, another app taking the camera, backgrounding) pause cleanly and clear
+  the buffer, and capture resumes on its own when the app comes back.
+- **Orphan cleanup**: leftover buffer files from a crash or kill are removed on launch.
+- **Voice trigger** (optional, off by default): say "save that". Recognition is **on-device
+  only** (`requiresOnDeviceRecognition`). The app also measures battery drain per hour so you can
+  see what the voice trigger costs.
+
+## How it works
+
+One `AVAssetWriter` with the `.mpeg4AppleHLS` profile cuts the stream into ~1 s fragmented-MP4
+segments. They are kept in a ring on disk (`Caches/`), and the oldest are deleted once the buffer is
+covered. On Save, the init segment and the retained segments are concatenated, trimmed to the exact
+range with `AVMutableComposition`, and exported **without re-encoding** (passthrough) to `.mov`.
+Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
+
+## Known limits
+
+- **No background recording.** iOS doesn't let apps use the camera in the background. When
+  RewindCam leaves the screen the buffer is cleared, and the app says so. Keep it open, with
+  Dim on for long sessions.
+- **Real-camera behaviour is not verified in CI.** CI runs on the Simulator, which has no camera,
+  no volume buttons, no thermal changes and no battery. Everything except `CameraFrameSource`,
+  `AVCaptureEventInteraction`, real Photos and the speech recogniser is tested through the
+  synthetic source and fakes. See the manual checklist below.
+- Changing a video setting, or a thermal step-down, **restarts the writer and clears the buffer**
+  (segments from different encoder settings can't be joined without re-encoding).
+- A Save resolves when the segment containing the tap is complete, about 1 s after the tap
+  (plus any post-roll). The clip still ends exactly at the tap.
+- Only one save can be pending at a time. A second tap during post-roll says "Already saving".
+- The voice trigger is English (en-US) and needs a device that supports on-device recognition.
+- UI tests run the synthetic source at 360×640 (the CI VM has no hardware encoder). Unit tests use
+  320×180 at 15 fps so 300 s of footage encodes in seconds.
+
+## Install on a real iPhone
+
+You need a Mac with Xcode 26 or newer and an iPhone on iOS 17.2 or newer. A free Apple ID works
+(apps signed with a free account expire after 7 days).
+
+1. Install XcodeGen and generate the project:
+
+   ```bash
+   brew install xcodegen
+   ```
+
+   ```bash
+   git clone https://github.com/esdu/app1.git && cd app1 && xcodegen generate
+   ```
+
+2. Open `RewindCam.xcodeproj`. Select the **RewindCam** target, then **Signing & Capabilities**:
+   pick your **Team**, and if Xcode says the identifier is taken, change the **Bundle Identifier**
+   (e.g. `com.yourname.rewindcam`).
+3. Connect the iPhone and trust the Mac. On the phone, turn on
+   **Settings › Privacy & Security › Developer Mode** and restart when asked.
+4. Choose your iPhone as the run destination and press **Run** (⌘R).
+5. On the phone, allow the developer under **Settings › General › VPN & Device Management** the first time.
+6. Grant Camera and Microphone on first launch. Photos access (add-only) is asked on the first save.
+
+Command-line alternative (after `xcodegen generate`):
+
+```bash
+xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/platform=iOS' -allowProvisioningUpdates DEVELOPMENT_TEAM=YOURTEAMID PRODUCT_BUNDLE_IDENTIFIER=com.yourname.rewindcam build
+```
+
+## Manual test checklist (real device)
+
+- [ ] **Volume buttons**: with the camera running, press volume up and then volume down. Each saves one
+      clip, and the system volume HUD does not appear.
+- [ ] **Clip contents**: a clip saved after 60 s with a 30 s buffer plays in Photos, lasts about 30 s,
+      ends at the moment of the tap, is upright, and has sound (and none with "Record sound" off).
+- [ ] **Post-roll**: with +10 s, the toast says "recording 10 s more" and the clip lasts about 40 s.
+- [ ] **Front camera**: the clip is upright and mirrored like the preview.
+- [ ] **4K / 60 fps**: offered only where supported, and clips play back smoothly.
+- [ ] **Interruptions**: during a phone call, from Camera.app opened via Control Center, and with the
+      app backgrounded and reopened, the banner explains, the buffer restarts, and no broken clip is saved.
+- [ ] **Thermal**: warm the phone (4K60, in the sun, while charging). At "serious" the orange banner shows
+      and the preset label drops; when the phone cools it returns to your setting.
+- [ ] **2-hour session**: Dim on, unplugged. Recording is still running after 2 h, the screen never
+      locked, Save still works, and storage in Settings › General › iPhone Storage › RewindCam does not grow.
+- [ ] **Battery drain per hour**: run 1 h unplugged with voice off, then 1 h with voice on. Read
+      the "Measured battery drain" row in Settings each time and note both %/h figures.
+- [ ] **Voice trigger**: "save that" saves a clip from about 2 m away; normal chatter doesn't.
+- [ ] **Orphans**: force-quit while recording, relaunch, and the app's storage drops back to about the buffer size.
+
+## Development
+
+- `project.yml` → `xcodegen generate` (never edit the `.pbxproj` by hand).
+- Swift 6 (strict concurrency), SwiftUI, AVFoundation; minimum iOS 17.2.
+- `-UITestMode` launch argument: synthetic camera, fake photo library in `Documents/FakePhotoLibrary`,
+  fresh settings.
+- CI ([`.github/workflows/ios.yml`](.github/workflows/ios.yml)): newest macOS runner and newest
+  Xcode, iPhone simulator picked dynamically, `xcodebuild test`. The `.xcresult` bundle, screenshots and a
+  summary are always uploaded. Screenshots are also published to the hidden git ref
+  `refs/ci/screenshots` (`git fetch origin refs/ci/screenshots`).
 
 ## Task checklist
-
-Each feature lands with its own tests and its own green CI run.
 
 - [x] DESIGN.md: architecture and buffer math
 - [x] Minimal green pipeline (XcodeGen, macOS 26 runner, newest Xcode, dynamic simulator, artifacts)
@@ -23,8 +134,8 @@ Each feature lands with its own tests and its own green CI run.
 - [x] Volume buttons via `AVCaptureEventInteraction` (needs a real device to verify)
 - [x] UI tests with screenshots (`-UITestMode`)
 - [x] Orphan cleanup on launch
-- [ ] Final README: screenshots, limits, device install
-- [ ] Stretch: on-device voice trigger ("save that"), behind a setting
+- [x] Final README: screenshots, limits, device install
+- [x] Stretch: on-device voice trigger ("save that") behind a setting, with measured battery drain
 
 ## License
 

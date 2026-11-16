@@ -175,6 +175,18 @@ Each change restarts the writer (new generation), and the UI shows a banner such
 
 ## 6. Voice trigger (stretch)
 
-`SFSpeechRecognizer` with `requiresOnDeviceRecognition = true`. It is off by default and lives behind a setting. Its
-cost is a continuous audio tap plus the on-device model. It is only enabled when the device
-reports `supportsOnDeviceRecognition`, so it never falls back to the server.
+* `SpeechVoiceTrigger` uses `SFSpeechRecognizer` (en-US) with
+  `requiresOnDeviceRecognition = true`. If the device doesn't report
+  `supportsOnDeviceRecognition`, the toggle is disabled. Audio never goes to a server.
+* No second microphone session: a `SampleFanOut` sink passes the capture session's own audio
+  samples to the recogniser (`SFSpeechAudioBufferRecognitionRequest.appendAudioSampleBuffer`).
+  With voice on and "Record sound" off, the mic is captured for recognition only, and the
+  recorder's writer still has no audio track.
+* The recognition request is recycled every 50 s, after each final result or error, and after every trigger
+  (so the transcript is cleared and the phrase can't fire twice). There is a 3 s cooldown.
+* Phrase matching (`VoicePhrase`) is a pure function on word boundaries: "save that" and "save this".
+* **Battery cost** can't be measured in CI (the Simulator has no battery). The app measures it instead:
+  `BatteryDrainMeter` records battery level against an injected `WallClock` while recording
+  unplugged, and Settings shows `%/h` labelled with the active configuration
+  (e.g. "1080p 30 fps, voice on"). The meter restarts on any configuration change, so the
+  on and off figures can be compared directly on a device.
