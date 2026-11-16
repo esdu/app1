@@ -33,9 +33,14 @@ struct PreviewSurface: View {
         if let session = model.captureSession {
             CameraPreview(session: session)
         } else if let image = model.previewImage {
-            Image(decorative: image.value, scale: 1)
-                .resizable()
-                .scaledToFill()
+            // Overlay + clip so an aspect-fill image never widens the layout beyond the screen.
+            Color.black
+                .overlay {
+                    Image(decorative: image.value, scale: 1)
+                        .resizable()
+                        .scaledToFill()
+                }
+                .clipped()
         } else {
             Color.black
         }

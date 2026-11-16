@@ -65,6 +65,8 @@ final class RewindCamUITests: XCTestCase {
         sixty.tap()
         XCTAssertTrue(sixty.isSelected, "60 s segment should be selected")
         screenshot(app, "settings-3-60s-selected")
+        app.swipeUp()
+        screenshot(app, "settings-3b-lower-sections")
 
         app.buttons["doneButton"].tap()
         let label = element(app, "bufferLabel")

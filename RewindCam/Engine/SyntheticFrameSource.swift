@@ -238,39 +238,42 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     private func drawPattern(in ctx: CGContext, pts: CMTime) {
         let w = CGFloat(format.width)
         let h = CGFloat(format.height)
-        // Static colour bars (cheap to encode) …
+        // Layout (CG origin is bottom-left): colour bars on top, a dark band below holding
+        // the moving box and the timestamp, kept in the middle so on-screen controls don't cover it.
         let bars: [(CGFloat, CGFloat, CGFloat)] = [
             (0.75, 0.75, 0.75), (0.75, 0.75, 0), (0, 0.75, 0.75), (0, 0.75, 0),
             (0.75, 0, 0.75), (0.75, 0, 0), (0, 0, 0.75), (0.1, 0.1, 0.1),
         ]
         let barWidth = w / CGFloat(bars.count)
+        let bandTop = h * 0.55
         for (i, c) in bars.enumerated() {
             ctx.setFillColor(red: c.0, green: c.1, blue: c.2, alpha: 1)
-            ctx.fill(CGRect(x: CGFloat(i) * barWidth, y: h * 0.35, width: barWidth + 1, height: h * 0.65))
+            ctx.fill(CGRect(x: CGFloat(i) * barWidth, y: bandTop, width: barWidth + 1, height: h - bandTop))
         }
         ctx.setFillColor(red: 0.08, green: 0.08, blue: 0.1, alpha: 1)
-        ctx.fill(CGRect(x: 0, y: 0, width: w, height: h * 0.35))
+        ctx.fill(CGRect(x: 0, y: 0, width: w, height: bandTop))
 
-        // … plus motion: a box sweeping once per second, so dropped frames are visible.
+        // Motion: a box sweeping once per second, so dropped frames are visible.
         let fps = Int64(format.frameRate)
         let phase = CGFloat(videoCount % fps) / CGFloat(fps)
-        let box = min(w, h) * 0.12
+        let box = min(w, h) * 0.08
         ctx.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
-        ctx.fill(CGRect(x: phase * (w - box), y: h * 0.22, width: box, height: box))
+        ctx.fill(CGRect(x: w * 0.15 + phase * (w * 0.7 - box), y: h * 0.42, width: box, height: box))
 
         // Timestamp text.
-        let size = max(10, min(w, h) * 0.07)
+        let size = max(8, min(w, h) * 0.06)
         if font == nil || CTFontGetSize(font!) != size {
             font = CTFontCreateWithName("Menlo-Bold" as CFString, size, nil)
         }
         let seconds = pts.seconds
-        let text = String(format: "SYNTHETIC  %.2f s", seconds.truncatingRemainder(dividingBy: 100_000))
+        let text = String(format: "SYNTHETIC %.2f s", seconds.truncatingRemainder(dividingBy: 100_000))
         let attributes: [NSAttributedString.Key: Any] = [
             NSAttributedString.Key(kCTFontAttributeName as String): font!,
-            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 1, alpha: 1),
+            NSAttributedString.Key(kCTForegroundColorAttributeName as String): CGColor(gray: 0.85, alpha: 1),
         ]
         let line = CTLineCreateWithAttributedString(NSAttributedString(string: text, attributes: attributes))
-        ctx.textPosition = CGPoint(x: w * 0.05, y: h * 0.06)
+        let textWidth = CTLineGetTypographicBounds(line, nil, nil, nil)
+        ctx.textPosition = CGPoint(x: (w - CGFloat(textWidth)) / 2, y: h * 0.34)
         CTLineDraw(line, ctx)
     }
 

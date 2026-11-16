@@ -18,6 +18,18 @@ struct ContentView: View {
                 .allowsHitTesting(false)
                 .accessibilityHidden(true)
 
+            // Scrims keep the controls legible over any footage.
+            VStack(spacing: 0) {
+                LinearGradient(colors: [.black.opacity(0.65), .clear], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 140)
+                Spacer()
+                LinearGradient(colors: [.clear, .black.opacity(0.8)], startPoint: .top, endPoint: .bottom)
+                    .frame(height: 300)
+            }
+            .ignoresSafeArea()
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+
             VStack(spacing: 10) {
                 StatusBar()
                 Banners()
