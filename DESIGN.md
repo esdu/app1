@@ -184,6 +184,14 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   recorder's writer still has no audio track.
 * The recognition request is recycled every 50 s, after each final result or error, and after every trigger
   (so the transcript is cleared and the phrase can't fire twice). There is a 3 s cooldown.
+* **One task at a time, by identity.** Each recognition request/task gets a generation number that
+  its result handler carries. Only callbacks from the current generation may fire the trigger or
+  recycle the task; recycling (and `stop()`) bumps the generation first, so the replaced task's late
+  callbacks (its cancellation error, the final result from `endAudio()`, partials still containing
+  the phrase) are ignored instead of cancelling the new task in a loop. `SFSpeechRecognizer` sits
+  behind a small `RecognitionEngine` protocol and the 50 s timer reads an injected `WallClock`, so
+  `SpeechVoiceTriggerTests` drive these callbacks with a fake engine. The real recogniser is still
+  only exercised on a device.
 * Phrase matching (`VoicePhrase`) is a pure function on word boundaries: "save that" and "save this".
 * **Battery cost** can't be measured in CI (the Simulator has no battery). The app measures it instead:
   `BatteryDrainMeter` records battery level against an injected `WallClock` while recording
