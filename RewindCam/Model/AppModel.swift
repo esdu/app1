@@ -192,8 +192,8 @@ final class AppModel {
         }
     }
 
-    static let cameraDeniedMessage = "RewindCam needs the camera to keep the last moments ready to save, "
-        + "so nothing is being recorded. Allow it in Settings › RewindCam › Camera."
+    static let cameraDeniedMessage = "RewindCam needs the camera to keep the last moments ready to save. "
+        + "Allow it in Settings › RewindCam › Camera."
 
     /// Shown while capture couldn't start (issue #8): camera denied → **Open Settings**; any other
     /// start failure → **Try Again**. Either way the app also re-checks when it returns to the
@@ -560,6 +560,7 @@ final class AppModel {
         // A failed reconfigure can leave a half-built session running; the recorder is already suspended.
         await environment.source.stop()
         environment.screen.setIdleTimerDisabled(false)
+        previewImage = nil // no stale frame that looks live
         if let error = error as? FrameSourceError, error == .cameraAccessDenied {
             phase = .cameraDenied
         } else {

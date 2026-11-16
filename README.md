@@ -148,7 +148,7 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       page opens. Allow the microphone and return (iOS may relaunch the app): the banner is gone and the
       next clip has sound.
 - [ ] **Camera denied**: on a fresh install, choose "Don't Allow" at the camera prompt. A red
-      "Camera access is off" banner explains why the app needs it; the badge says CAMERA OFF, Save is
+      "Camera access is off" banner explains why the app needs it; the badge says OFF, Save is
       greyed out (VoiceOver reads why), and a volume-button press shows "Can't save" instead of saving.
       The Settings sheet still opens. Tap **Open Settings**: RewindCam's page opens. Allow the camera and
       return (iOS may relaunch the app): recording starts without relaunching by hand, the banner is

@@ -80,6 +80,9 @@ private struct StatusBar: View {
             BatteryLabel()
         }
         .font(.footnote.weight(.semibold).monospacedDigit())
+        // One row: a long phase label ("STARTING") shrinks a little instead of wrapping the pills.
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
         .foregroundStyle(.white)
         .padding(.top, 4)
     }
@@ -107,8 +110,8 @@ private struct RecordingBadge: View {
         case .starting: "STARTING"
         case .recording: "REC"
         case .paused: "PAUSED"
-        case .cameraDenied: "CAMERA OFF"
-        case .failed: "STOPPED"
+        case .cameraDenied: "OFF"
+        case .failed: "ERROR"
         }
     }
 }
