@@ -41,6 +41,8 @@ final class AppModel {
     private(set) var previewImage: UncheckedSendable<CGImage>?
     private(set) var supportedResolutions: [VideoResolution]
     private(set) var orphansRemoved = 0
+    private(set) var isVoiceListening = false
+    private(set) var batteryDrain = BatteryDrainMeter()
 
     let environment: AppEnvironment
     let recorder: RollingRecorder
@@ -51,6 +53,10 @@ final class AppModel {
     @ObservationIgnored private var wantsRunning = false
     @ObservationIgnored private var didCleanUp = false
     @ObservationIgnored private var appliedCapture: CaptureConfiguration?
+    /// Source → recorder, plus an optional tap for the voice trigger.
+    private let fanOut: SampleFanOut
+    /// Bumped on every voice start/stop so a stale authorization callback can't start a second session.
+    @ObservationIgnored private var voiceSession = 0
 
     init(environment: AppEnvironment) {
         self.environment = environment
@@ -69,8 +75,9 @@ final class AppModel {
                                                          audioEnabled: loaded.audioEnabled,
                                                          realTime: environment.realTime))
 
+        fanOut = SampleFanOut(primary: recorder)
         environment.thermal.onChange = { [weak self] level in self?.thermalChanged(level) }
-        environment.source.setSink(recorder)
+        environment.source.setSink(fanOut)
         environment.source.setEventHandler { [weak self] event in
             guard let self else { return }
             Task { @MainActor in self.handle(event) }
@@ -98,8 +105,17 @@ final class AppModel {
                                       audioEnabled: settings.audioEnabled).byteCap
     }
 
+    var isVoiceAvailable: Bool { environment.voice?.isAvailable ?? false }
+
+    /// The voice trigger needs the microphone even when sound isn't recorded into clips.
     var captureConfiguration: CaptureConfiguration {
-        CaptureConfiguration(preset: activePreset, audioEnabled: settings.audioEnabled, camera: settings.camera)
+        CaptureConfiguration(preset: activePreset,
+                             audioEnabled: settings.audioEnabled || (settings.voiceTriggerEnabled && isVoiceAvailable),
+                             camera: settings.camera)
+    }
+
+    private var measuredConfiguration: String {
+        "\(activePreset), voice \(isVoiceListening ? "on" : "off")"
     }
 
     var recorderConfiguration: RollingRecorder.Configuration {
@@ -156,6 +172,9 @@ final class AppModel {
         settings = new
         environment.settingsStore.save(new)
         applyQuality()
+        if new.voiceTriggerEnabled != old.voiceTriggerEnabled {
+            if new.voiceTriggerEnabled { startVoiceIfNeeded() } else { stopVoice() }
+        }
     }
 
     // MARK: Thermal
@@ -194,6 +213,7 @@ final class AppModel {
         let postRoll = Double(settings.postRollSeconds)
         let ticket = recorder.beginSave(postRoll: postRoll)
         isSaving = true
+        if trigger == .voice { environment.haptics.success() }
         if postRoll > 0, !ticket.isFulfilled {
             showToast("Saving… recording \(settings.postRollSeconds) s more")
         }
@@ -270,6 +290,8 @@ final class AppModel {
             phase = .recording
             environment.screen.setIdleTimerDisabled(true)
             startStatusLoop()
+            startVoiceIfNeeded()
+            batteryDrain.reset(configuration: measuredConfiguration)
         } catch {
             appliedCapture = nil
             phase = .failed(error.localizedDescription)
@@ -278,6 +300,7 @@ final class AppModel {
     }
 
     private func tearDown(reason: InterruptionReason?) async {
+        stopVoice()
         await environment.source.stop()
         recorder.suspend()
         appliedCapture = nil
@@ -316,5 +339,46 @@ final class AppModel {
         if let fake = environment.fakeLibrary {
             fakeLibraryCount = fake.clips().count
         }
+        if phase == .recording {
+            batteryDrain.record(level: batteryLevel, isCharging: isCharging, at: environment.clock.now())
+        }
+    }
+
+    // MARK: Voice trigger
+
+    private func startVoiceIfNeeded() {
+        guard settings.voiceTriggerEnabled, phase == .recording, !isVoiceListening,
+              let voice = environment.voice else { return }
+        guard voice.isAvailable else {
+            showToast("Voice trigger needs on-device speech recognition, which this iPhone doesn't support.", isError: true)
+            return
+        }
+        isVoiceListening = true
+        voiceSession += 1
+        let session = voiceSession
+        Task {
+            let authorized = await voice.requestAuthorization()
+            guard session == voiceSession, isVoiceListening else { return }
+            guard authorized else {
+                isVoiceListening = false
+                showToast("Allow Speech Recognition in Settings to use the voice trigger.", isError: true)
+                return
+            }
+            fanOut.setTap(voice)
+            voice.start { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in self.save(trigger: .voice) }
+            }
+            batteryDrain.reset(configuration: measuredConfiguration)
+        }
+    }
+
+    private func stopVoice() {
+        guard isVoiceListening else { return }
+        isVoiceListening = false
+        voiceSession += 1
+        fanOut.setTap(nil)
+        environment.voice?.stop()
+        batteryDrain.reset(configuration: measuredConfiguration)
     }
 }

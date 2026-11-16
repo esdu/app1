@@ -19,9 +19,9 @@ Each feature lands with its own tests and its own green CI run.
 - [x] Interruptions: buffer resets cleanly, no corrupt clips
 - [x] Thermal step-down policy
 - [x] Settings persistence
-- [ ] App model + SwiftUI UI (Save button, toast, haptic, settings, dim mode, battery)
-- [ ] Volume buttons via `AVCaptureEventInteraction`
-- [ ] UI tests with screenshots (`-UITestMode`)
+- [x] App model + SwiftUI UI (Save button, toast, haptic, settings, dim mode, battery)
+- [x] Volume buttons via `AVCaptureEventInteraction` (needs a real device to verify)
+- [x] UI tests with screenshots (`-UITestMode`)
 - [x] Orphan cleanup on launch
 - [ ] Final README: screenshots, limits, device install
 - [ ] Stretch: on-device voice trigger ("save that"), behind a setting

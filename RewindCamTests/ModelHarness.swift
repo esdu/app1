@@ -14,6 +14,9 @@ final class ModelHarness {
     let defaults: UserDefaults
     let suiteName: String
     let storage: FileBufferStorage
+    let voice = FakeVoiceTrigger()
+    let clock = FakeWallClock()
+    let battery = FakeBatteryMonitor(level: 0.8)
 
     init(thermal: ThermalLevel = .nominal, suiteName: String = "RewindCamTests-\(UUID().uuidString)") {
         root = FileManager.default.temporaryDirectory
@@ -31,8 +34,9 @@ final class ModelHarness {
         AppEnvironment(
             isUITest: false, source: source, photoLibrary: library, storage: storage,
             settingsStore: UserDefaultsSettingsStore(defaults: defaults), thermal: thermal,
-            battery: FakeBatteryMonitor(level: 0.8), screen: screen, haptics: haptics,
-            realTime: false, fakeLibrary: library, supportsCaptureButtons: false)
+            battery: battery, screen: screen, haptics: haptics,
+            realTime: false, fakeLibrary: library, supportsCaptureButtons: false,
+            voice: voice, clock: clock)
     }
 
     func makeModel() -> AppModel { AppModel(environment: makeEnvironment()) }

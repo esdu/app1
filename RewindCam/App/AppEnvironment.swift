@@ -18,6 +18,9 @@ struct AppEnvironment {
     var fakeLibrary: FakePhotoLibrary?
     /// Only set when the volume-button capture interaction can work (real camera).
     var supportsCaptureButtons: Bool
+    /// On-device "save that" recogniser (nil where unsupported, e.g. UI tests).
+    var voice: VoiceTrigger? = nil
+    var clock: WallClock = SystemWallClock()
 
     static let uiTestArgument = "-UITestMode"
 
@@ -38,7 +41,8 @@ struct AppEnvironment {
             haptics: SystemHaptics(),
             realTime: true,
             fakeLibrary: nil,
-            supportsCaptureButtons: true
+            supportsCaptureButtons: true,
+            voice: SpeechVoiceTrigger()
         )
     }
 
