@@ -80,6 +80,9 @@ private struct StatusBar: View {
             BatteryLabel()
         }
         .font(.footnote.weight(.semibold).monospacedDigit())
+        // One row: a long phase label ("STARTING") shrinks a little instead of wrapping the pills.
+        .lineLimit(1)
+        .minimumScaleFactor(0.75)
         .foregroundStyle(.white)
         .padding(.top, 4)
     }
@@ -107,6 +110,7 @@ private struct RecordingBadge: View {
         case .starting: "STARTING"
         case .recording: "REC"
         case .paused: "PAUSED"
+        case .cameraDenied: "OFF"
         case .failed: "ERROR"
         }
     }
@@ -149,15 +153,13 @@ private struct Banners: View {
                 Banner(icon: "thermometer.high", text: message, tint: .orange)
                     .accessibilityIdentifier("thermalBanner")
             }
-            switch model.phase {
-            case .paused(let why):
+            if case .paused(let why) = model.phase {
                 Banner(icon: "pause.circle.fill", text: why + " The buffer was cleared.", tint: .yellow)
                     .accessibilityIdentifier("pausedBanner")
-            case .failed(let why):
-                Banner(icon: "exclamationmark.triangle.fill", text: why, tint: .red)
-                    .accessibilityIdentifier("errorBanner")
-            default:
-                EmptyView()
+            }
+            // Camera denied (Open Settings) or another start failure (Try Again).
+            if let notice = model.startFailureNotice {
+                NoticeBanner(notice: notice)
             }
             if let error = model.status.lastError {
                 Banner(icon: "exclamationmark.circle", text: error, tint: .red)
@@ -223,6 +225,7 @@ struct NoticeBanner: View {
     private func perform(_ action: AppNotice.Action) {
         switch action {
         case .openSettings: model.openAppSettings()
+        case .tryAgain: model.retryStart()
         }
     }
 }
@@ -313,6 +316,8 @@ private struct Controls: View {
     @Binding var showSettings: Bool
 
     var body: some View {
+        // Nothing is buffered unless recording, so Save is disabled and says why (issue #8).
+        let unavailable = model.saveUnavailableReason
         HStack(alignment: .center) {
             RoundIconButton(systemImage: "moon.fill", label: "Dim screen") {
                 model.setDimmed(true)
@@ -330,19 +335,21 @@ private struct Controls: View {
                     } else {
                         Text("SAVE").font(.title2.weight(.heavy))
                     }
-                    Text(saveSubtitle)
+                    Text(unavailable == nil ? saveSubtitle : unavailableSubtitle)
                         .font(.caption2.weight(.semibold))
                         .multilineTextAlignment(.center)
                 }
-                .foregroundStyle(.white)
+                .foregroundStyle(.white.opacity(unavailable == nil ? 1 : 0.7))
                 .frame(width: 128, height: 128)
-                .background(Circle().fill(Color.red))
-                .overlay(Circle().stroke(.white, lineWidth: 4))
+                .background(Circle().fill(unavailable == nil ? Color.red : Color.gray.opacity(0.45)))
+                .overlay(Circle().stroke(.white.opacity(unavailable == nil ? 1 : 0.45), lineWidth: 4))
                 .shadow(radius: 8)
             }
             .buttonStyle(.plain)
+            .disabled(unavailable != nil)
             .accessibilityLabel("Save")
-            .accessibilityHint("Saves the last \(model.settings.bufferSeconds) seconds to Photos")
+            .accessibilityHint(unavailable
+                ?? "Saves the last \(model.settings.bufferSeconds) seconds to Photos")
             .accessibilityIdentifier("saveButton")
 
             Spacer()
@@ -353,6 +360,10 @@ private struct Controls: View {
             .accessibilityIdentifier("settingsButton")
         }
         .padding(.horizontal, 8)
+    }
+
+    private var unavailableSubtitle: String {
+        model.phase == .starting || model.phase == .idle ? "starting…" : "not recording"
     }
 
     private var saveSubtitle: String {

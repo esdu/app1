@@ -52,6 +52,8 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     /// recorder tests) emits audio whenever its format has it.
     private var emitsAudio = true
     private var audioFailure: AudioUnavailableReason?
+    private var startError: FrameSourceError?
+    private var starts = 0
 
     static let audioSampleRate: Int32 = 48_000
     static let audioChunk = 1_024
@@ -78,7 +80,15 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     /// Like `CameraFrameSource`, audio is delivered only when the configuration asks for it and the
     /// (simulated) microphone is usable; the result says which.
     func start(_ configuration: CaptureConfiguration) async throws -> ActiveCapture {
-        queue.sync { () -> ActiveCapture in
+        try queue.sync { () throws -> ActiveCapture in
+            starts += 1
+            if let startError {
+                // Like a camera that can't start: nothing runs afterwards.
+                timer?.cancel()
+                timer = nil
+                timelineStarted = false
+                throw startError
+            }
             if followsConfiguration {
                 format.frameRate = configuration.preset.frameRate.rawValue
                 format.audioEnabled = configuration.audioEnabled
@@ -104,6 +114,15 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     func setAudioUnavailable(_ reason: AudioUnavailableReason?) {
         queue.sync { audioFailure = reason }
     }
+
+    /// Makes the next `start(_:)` calls throw `error` (nil: start normally), like a denied camera
+    /// (`.cameraAccessDenied`) or one that can't be configured. Tests and `-UITestDenyCamera` use it.
+    func setStartError(_ error: FrameSourceError?) {
+        queue.sync { startError = error }
+    }
+
+    /// How many times `start(_:)` was called, including failed starts (tests).
+    var startCount: Int { queue.sync { starts } }
 
     func stop() async {
         queue.sync {

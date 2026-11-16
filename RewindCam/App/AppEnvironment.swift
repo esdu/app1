@@ -20,8 +20,8 @@ struct AppEnvironment {
     var supportsCaptureButtons: Bool
     /// Keeps a save (export + Photos) running when the user locks the phone or leaves the app.
     var backgroundTasks: BackgroundTasks
-    /// "Open Settings" buttons (microphone notice; camera denied in #8). Real in `-UITestMode` too, so
-    /// a UI test can see the Settings app come forward.
+    /// "Open Settings" buttons (microphone notice, camera denied). Opens the real Settings app in
+    /// `-UITestMode` too, so a UI test can see it come forward.
     var appSettings: AppSettingsOpener
     /// On-device "save that" recogniser (nil where unsupported, e.g. UI tests).
     var voice: VoiceTrigger? = nil
@@ -32,6 +32,11 @@ struct AppEnvironment {
     static let uiTestPhotosFailOnceArgument = "-UITestPhotosFailOnce"
     /// With `-UITestMode`: the synthetic source acts as if microphone access were denied.
     static let uiTestDenyMicrophoneArgument = "-UITestDenyMicrophone"
+    /// With `-UITestMode`: the synthetic source acts as if camera access were denied, until the user
+    /// taps Open Settings (as if they allowed it there), so a UI test can walk the whole way back.
+    static let uiTestDenyCameraArgument = "-UITestDenyCamera"
+    /// With `-UITestMode`: the synthetic source fails every start with "no camera" (Try Again path).
+    static let uiTestNoCameraArgument = "-UITestNoCamera"
 
     static func current(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         arguments.contains(uiTestArgument) ? uiTest(arguments: arguments) : live()
@@ -73,6 +78,15 @@ struct AppEnvironment {
         if arguments.contains(uiTestDenyMicrophoneArgument) {
             source.setAudioUnavailable(.microphoneDenied)
         }
+        let denyCamera = arguments.contains(uiTestDenyCameraArgument)
+        if denyCamera {
+            source.setStartError(.cameraAccessDenied)
+        } else if arguments.contains(uiTestNoCameraArgument) {
+            source.setStartError(.noCamera)
+        }
+        let appSettings = UITestAppSettingsOpener { [source] in
+            if denyCamera { source.setStartError(nil) }
+        }
         return AppEnvironment(
             isUITest: true,
             source: source,
@@ -87,7 +101,24 @@ struct AppEnvironment {
             fakeLibrary: fake,
             supportsCaptureButtons: false,
             backgroundTasks: SystemBackgroundTasks(),
-            appSettings: SystemAppSettingsOpener()
+            appSettings: appSettings
         )
+    }
+}
+
+/// `-UITestMode` only: opens the real Settings app, after running `beforeOpening` — with
+/// `-UITestDenyCamera`, that "allows" the camera, standing in for the user's toggle in Settings.
+@MainActor
+final class UITestAppSettingsOpener: AppSettingsOpener {
+    private let system = SystemAppSettingsOpener()
+    private let beforeOpening: @MainActor () -> Void
+
+    init(beforeOpening: @escaping @MainActor () -> Void) {
+        self.beforeOpening = beforeOpening
+    }
+
+    func openAppSettings() {
+        beforeOpening()
+        system.openAppSettings()
     }
 }

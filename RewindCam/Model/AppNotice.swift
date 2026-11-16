@@ -1,14 +1,17 @@
 /// A persistent problem the user should know about, with at most one action that fixes it.
 /// `AppModel` derives notices from its state; `NoticeBanner` (ContentView) renders them.
 ///
-/// Issue #3 adds the microphone notice (`AppModel.microphoneNotice`). Camera denied (#8) is meant to
-/// reuse this type, the banner and `.openSettings` (adding a `.tryAgain` action for other start
-/// failures), rather than adding a second "go to Settings" path.
+/// Issue #3 adds the microphone notice (`AppModel.microphoneNotice`); issue #8 adds the start-failure
+/// notice (`AppModel.startFailureNotice`: camera denied → `.openSettings`, other failures → `.tryAgain`).
+/// There is one "go to Settings" path and one banner for all of them.
 struct AppNotice: Equatable, Sendable {
     enum Action: Equatable, Sendable {
         /// "Open Settings": opens RewindCam's page in the Settings app via `AppModel.openAppSettings()`.
         /// The button's accessibility identifier is `openSettingsButton`.
         case openSettings
+        /// "Try Again": re-runs the normal start pipeline via `AppModel.retryStart()`.
+        /// The button's accessibility identifier is `tryAgainButton`.
+        case tryAgain
     }
 
     enum Severity: Equatable, Sendable {
@@ -31,12 +34,14 @@ extension AppNotice.Action {
     var title: String {
         switch self {
         case .openSettings: "Open Settings"
+        case .tryAgain: "Try Again"
         }
     }
 
     var accessibilityIdentifier: String {
         switch self {
         case .openSettings: "openSettingsButton"
+        case .tryAgain: "tryAgainButton"
         }
     }
 }
