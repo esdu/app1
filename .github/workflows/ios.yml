@@ -75,6 +75,16 @@ jobs:
           cat artifacts/test-summary.md >> "$GITHUB_STEP_SUMMARY" || true
           cat artifacts/test-summary.md || true
           cp xcodebuild.log artifacts/ 2>/dev/null || true
+          # Crash reports (test host or app): print the crashed thread and keep the .ips files.
+          mkdir -p artifacts/crashes
+          if [ -d "$RESULT_BUNDLE" ]; then
+            xcrun xcresulttool export diagnostics --path "$RESULT_BUNDLE" --output-path artifacts/diagnostics >/dev/null 2>&1 || true
+          fi
+          find artifacts/diagnostics ~/Library/Logs/DiagnosticReports \( -name '*.ips' -o -name '*.crash' \) \
+            -newer project.yml 2>/dev/null | grep -i -E 'rewindcam|xctest' | while read -r f; do cp "$f" artifacts/crashes/; done || true
+          if ls artifacts/crashes/*.ips >/dev/null 2>&1; then
+            python3 scripts/crash-summary.py artifacts/crashes/*.ips | tee artifacts/crashes/summary.txt
+          fi
           ls -la artifacts/screenshots | head -50
 
       - name: Upload result bundle
@@ -108,6 +118,7 @@ jobs:
           [ -f artifacts/screenshots/manifest.json ] || { echo "no screenshots"; exit 0; }
           rm -rf ci-screenshots && python3 scripts/rename-screenshots.py artifacts/screenshots ci-screenshots
           cp artifacts/test-summary.md ci-screenshots/ 2>/dev/null || true
+          if ls artifacts/crashes/* >/dev/null 2>&1; then mkdir -p ci-screenshots/crashes && cp artifacts/crashes/* ci-screenshots/crashes/; fi
           # One orphan commit, force-pushed: the ref always holds only the latest run.
           export GIT_INDEX_FILE="$RUNNER_TEMP/screenshots.index"
           rm -f "$GIT_INDEX_FILE"

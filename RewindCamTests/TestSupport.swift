@@ -32,7 +32,12 @@ final class RecorderHarness {
         source.setSink(recorder)
     }
 
-    deinit { try? FileManager.default.removeItem(at: root) }
+    deinit {
+        // Stop the writer deterministically before deleting its folder.
+        source.setSink(nil)
+        recorder.suspend()
+        try? FileManager.default.removeItem(at: root)
+    }
 
     /// Media time of the next frame (i.e. "now" on the synthetic timeline).
     var now: Double { source.nextVideoPTS.seconds }

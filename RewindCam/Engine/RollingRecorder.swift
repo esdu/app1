@@ -194,6 +194,14 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         super.init()
     }
 
+    deinit {
+        // Never let an AVAssetWriter be released mid-session: its encoder threads may still be
+        // delivering output. (All queue blocks retain `self`, so nothing else runs now.)
+        if let g = generation, g.writer.status == .writing {
+            g.writer.cancelWriting()
+        }
+    }
+
     var currentConfiguration: Configuration { queue.sync { configuration } }
 
     /// Lock-protected snapshot; safe to call from the main thread at any rate.
