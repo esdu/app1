@@ -58,7 +58,17 @@ final class RecorderHarness {
         source.generate(seconds: extra)
         let bundle = try await awaitBundle(ticket)
         defer { bundle.discard() }
-        return try await ClipExporter.export(bundle)
+        return try keep(try await ClipExporter.export(bundle))
+    }
+
+    /// Moves an exported clip out of its save folder (which `discard()` deletes).
+    func keep(_ clip: ExportedClip) throws -> ExportedClip {
+        let dir = root.appendingPathComponent("KeptClips", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dest = dir.appendingPathComponent(clip.url.lastPathComponent)
+        try? FileManager.default.removeItem(at: dest)
+        try FileManager.default.moveItem(at: clip.url, to: dest)
+        return ExportedClip(url: dest, duration: clip.duration)
     }
 
     func awaitBundle(_ ticket: SaveTicket, timeout: Double = 60) async throws -> SegmentBundle {
