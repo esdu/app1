@@ -42,6 +42,10 @@ source, because the Simulator has no camera.*
   phone gets hot. Battery level is shown.
 - **Interruptions** (calls, another app taking the camera, backgrounding) pause cleanly and clear
   the buffer, and capture resumes on its own when the app comes back.
+- **Camera errors recover or say so**: after a capture-session error the app restarts the camera
+  (at once, then backing off for about 30 s). If that doesn't work it stops, wakes the screen from Dim
+  and shows "Not recording" with **Try Again**, instead of claiming to restart forever. A status
+  check every 0.5 s also resumes recording if the camera came back without telling the app.
 - **Orphan cleanup**: leftover buffer files and half-written exports from a crash or kill are removed
   on launch. Finished clips that didn't reach Photos are kept.
 - **Voice trigger** (optional, off by default): say "save that". Recognition is **on-device
@@ -132,6 +136,14 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
 - [ ] **4K / 60 fps**: offered only where supported, and clips play back smoothly.
 - [ ] **Interruptions**: during a phone call, from Camera.app opened via Control Center, and with the
       app backgrounded and reopened, the banner explains, the buffer restarts, and no broken clip is saved.
+- [ ] **Camera error / camera taken while dimmed**: record with Dim on. (1) Open Camera.app from
+      Control Center, take a photo, close it: RewindCam's banner says another app is using the camera,
+      and recording resumes on its own (the buffer counter climbs again) without waking it. (2) Trigger a
+      media-services reset (Settings › Developer › Reset Media Services, where the Developer menu
+      offers it) while RewindCam is open and dimmed: within a few seconds it is recording again, or, if the
+      camera can't restart within about 30 s, the screen wakes and shows "Not recording" with
+      **Try Again**, which starts recording. It never stays on "Camera error … Restarting…" with the
+      counter at 0 s.
 - [ ] **Thermal**: warm the phone (4K60, in the sun, while charging). At "serious" the orange banner shows
       and the preset label drops; when the phone cools it returns to your setting.
 - [ ] **2-hour session**: Dim on, unplugged. Recording is still running after 2 h, the screen never

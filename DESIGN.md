@@ -30,7 +30,7 @@ Photos as one clip. The app has no network code, no accounts and no analytics.
 | Capture | `FrameSource` protocol: `CameraFrameSource` (AVCaptureSession) and `SyntheticFrameSource` (test-pattern `CVPixelBuffer`s + silent PCM) | `SyntheticFrameSource` in manual mode (frames generated as fast as the encoder takes them, with synthetic timestamps) |
 | Buffer | `RollingRecorder` (writer + segment files) and `SegmentRing` (pure eviction policy) | unit tests, no camera needed |
 | Export | `ClipExporter`: concatenate init + segments, trim with `AVMutableComposition`, passthrough export to `.mov` | unit tests load the result with `AVURLAsset` and decode every frame |
-| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore`, `AppSettingsOpener` (all protocols) | fakes in tests and in `-UITestMode` |
+| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore`, `AppSettingsOpener`, `DelayScheduler` (all protocols) | fakes in tests and in `-UITestMode` |
 | UI | SwiftUI; `AppModel` is the single source of truth | XCUITest with `-UITestMode` |
 
 ### Threading (Swift 6 strict concurrency)
@@ -311,6 +311,61 @@ failed-phase check covers an `.active` without a background trip, e.g. right aft
 While a start has failed, source events are ignored (nothing to pause or resume) and
 `saveUnavailableReason` disables Save; it is non-nil in every phase but `.recording`, because the
 recorder is suspended and holds nothing then. A save from the volume buttons shows it as a toast.
+Runtime recovery (next section) reuses this: when its restarts give up it calls `startFailed`, so
+leaving that state is again only a new `bringUp`.
+
+### Event ordering and recovery (issue #4)
+
+Capture state changes from two places, and each has exactly one path:
+
+* **Session mutations** (start, stop, reconfigure, recovery attempts) go through
+  `AppModel.schedulePipeline`, which runs one piece of work at a time, in order. `pipelineDepth`
+  counts work queued or running.
+* **Source events** (`FrameSourceEvent`, emitted on any thread) go through one ordered channel: the
+  handler given to `FrameSource.setEventHandler` only yields into an `AsyncStream`, and a single
+  main-actor task created in `AppModel.init` consumes it and calls `handle(_:)`. Events are therefore
+  handled in emission order (the old one-`Task`-per-event forwarding could swap an `.interrupted`
+  and its `.interruptionEnded`, leaving the recorder suspended while the session ran).
+  `handle` records the event in `sourceInterruption`; if no pipeline work is pending it applies it at
+  once (`applySourceState()`: suspend + `.paused(message)`, or resume + `.recording`), otherwise the
+  last piece of pipeline work applies it when it finishes, so an event never lands in the middle of a
+  start or stop. While a start has failed (`phase.isStartFailure`) events are ignored: the source was
+  stopped and only `start()` leaves that phase. Tests wait on the channel with
+  `waitForCaptureEvents()` (a barrier item) and `waitForCapture()` (pipeline and channel until both
+  are idle).
+
+**Recovery entry point: `AppModel.recoverCapture(_ reason: CaptureRecoveryReason)`.** It suspends the
+recorder, sets `.paused(reason.pausedMessage)` ("Camera error: … Restarting…"), and, unless a
+recovery is already running (whose budget then continues), starts one (`recovery`, with an id).
+Each attempt runs on the pipeline and calls `FrameSource.resumeRunning()`, which starts the session
+again with its current configuration if it is stopped, and emits `.interruptionEnded` and returns
+true whenever it runs afterwards, including when it never stopped (the old code returned silently in
+that case, and never retried when `startRunning()` didn't take). Attempts follow `RestartBackoff`, a
+pure value: immediately, then after 1, 2, 4, 8 and 15 s (6 attempts, about 30 s). Timers use
+`environment.scheduler` (`DelayScheduler`; `FakeDelayScheduler` in tests, so no test sleeps). Each
+timer and attempt checks the recovery id and `automaticCaptureAllowed`, so a stop, background, new
+start or ordinary interruption (which iOS ends itself) supersedes it without a race. When the
+budget is spent the model wakes the screen from Dim, plays the failure haptic and calls
+`startFailed(.restartFailed(...))`: capture stops, the idle timer is re-enabled and the phase is
+`.failed("The camera stopped (…) and couldn't be restarted.")` with Try Again. Callers today: a
+runtime-error event (`.runtimeError`) and the safety net (`.sourceStopped`). The frame watchdog (#9)
+should add its own reason here rather than a second restart path.
+
+**Safety net: `AppModel.reconcileCapture()`**, run by `statusTick()` every 0.5 s (the status loop,
+also on `environment.scheduler`). It compares `FrameSource.runState` (`.running`, `.interrupted`,
+`.stopped`; for the camera, `isRunning`/`isInterrupted`) with phase and recorder:
+running but the recorder suspended or the phase paused → resume; interrupted while recording → pause;
+stopped while recording or paused, with no recovery running → `recoverCapture(.sourceStopped)`. It
+does nothing while pipeline work runs or capture isn't wanted. #9 adds its watchdog to `statusTick()`.
+
+**For explicit user pause (#15):** every automatic path (event application, `recoverCapture`,
+recovery timers and attempts, the safety net) checks `automaticCaptureAllowed`, today `wantsRunning`.
+A user pause belongs in that property, not in a second event stream or restart path.
+
+`SyntheticFrameSource` simulates all of it: `simulateRuntimeError(_:sessionStops:)` (case (a): the
+session keeps running; (b): it stops), `setResumeFailures(n)` (the next n restarts fail),
+`setRunStateSilently(_:)` (a missed notification), `resumeCount`. Not covered by CI: whether a real
+`AVCaptureSession` after a runtime error or a media-services reset behaves as modelled (README checklist).
 
 ### Bounded disk
 

@@ -12,6 +12,15 @@ enum SaveTrigger: Sendable {
     case button, volumeButton, voice
 }
 
+/// What travels through `AppModel`'s ordered source-event channel.
+private enum CaptureChannelItem: Sendable {
+    /// Something the source reported, in the order it reported it.
+    case event(FrameSourceEvent)
+    /// Resumed when the consumer reaches it: every event yielded before it has been handled
+    /// (`AppModel.waitForCaptureEvents()`).
+    case barrier(CheckedContinuation<Void, Never>)
+}
+
 /// Single source of truth for the UI. Orchestrates source → recorder → exporter → Photos.
 @MainActor
 @Observable
@@ -65,11 +74,32 @@ final class AppModel {
     /// What the running source actually delivers (nil while not started). The recorder's audio input
     /// follows this, never the "Record sound" setting alone (issue #3).
     private(set) var activeCapture: ActiveCapture?
+    /// Automatic capture recovery in progress (issue #4); nil otherwise. See `recoverCapture(_:)`.
+    private(set) var recovery: CaptureRecovery?
+
+    /// One automatic recovery: why it started and how much of its restart budget is spent.
+    struct CaptureRecovery: Equatable {
+        /// Identifies this recovery, so a backoff timer or attempt from an earlier one does nothing.
+        let id: Int
+        let reason: CaptureRecoveryReason
+        var backoff = RestartBackoff()
+    }
 
     let environment: AppEnvironment
     let recorder: RollingRecorder
     @ObservationIgnored private var pipelineTask: Task<Void, Never>?
-    @ObservationIgnored private var statusTask: Task<Void, Never>?
+    /// Pipeline work queued or running. While non-zero the pipeline owns phase and recorder: source
+    /// events are recorded, and applied when the last piece of work finishes (`schedulePipeline`).
+    @ObservationIgnored private var pipelineDepth = 0
+    @ObservationIgnored private var sourceEventsWhilePipelineBusy = false
+    /// What the source last reported: the interruption in effect, or nil once it said it runs again.
+    @ObservationIgnored private var sourceInterruption: InterruptionReason?
+    @ObservationIgnored private var recoveryCounter = 0
+    @ObservationIgnored private var statusLoopRunning = false
+    /// The ordered source-event channel (issue #4); see `handle(_:)`.
+    private let captureEvents: AsyncStream<CaptureChannelItem>.Continuation
+    /// Source events handled so far (tests compare it with how many were emitted).
+    @ObservationIgnored private(set) var handledSourceEvents = 0
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var savedBrightness: CGFloat?
     @ObservationIgnored private var wantsRunning = false
@@ -102,11 +132,21 @@ final class AppModel {
                                                          realTime: environment.realTime))
 
         fanOut = SampleFanOut(primary: recorder)
+        // Source events arrive on any thread. They go through one AsyncStream, consumed by one
+        // main-actor task, so they are handled strictly in the order the source emitted them (issue #4;
+        // one unstructured Task per event could run them out of order).
+        let (events, captureEvents) = AsyncStream<CaptureChannelItem>.makeStream()
+        self.captureEvents = captureEvents
         environment.thermal.onChange = { [weak self] level in self?.thermalChanged(level) }
         environment.source.setSink(fanOut)
-        environment.source.setEventHandler { [weak self] event in
-            guard let self else { return }
-            Task { @MainActor in self.handle(event) }
+        environment.source.setEventHandler { event in captureEvents.yield(.event(event)) }
+        Task { [weak self] in
+            for await item in events {
+                switch item {
+                case .event(let event): self?.handle(event)
+                case .barrier(let reached): reached.resume()
+                }
+            }
         }
         if let synthetic = environment.source as? SyntheticFrameSource {
             synthetic.setPreviewHandler { [weak self] image in
@@ -115,6 +155,10 @@ final class AppModel {
             }
         }
         refreshStatus()
+    }
+
+    deinit {
+        captureEvents.finish() // ends the consumer task
     }
 
     // MARK: Derived state
@@ -249,6 +293,22 @@ final class AppModel {
             await task.value
             if task == pipelineTask { break }
         }
+    }
+
+    /// Returns once every source event emitted before the call has been handled (tests).
+    func waitForCaptureEvents() async {
+        await withCheckedContinuation { (reached: CheckedContinuation<Void, Never>) in
+            if case .terminated = captureEvents.yield(.barrier(reached)) { reached.resume() }
+        }
+    }
+
+    /// Awaits pipeline work and source events until neither has anything left, e.g. an event that
+    /// started a recovery attempt whose restart emitted another event (tests).
+    func waitForCapture() async {
+        repeat {
+            await waitForPipeline()
+            await waitForCaptureEvents()
+        } while pipelineDepth > 0
     }
 
     func scenePhaseChanged(_ phase: ScenePhase) {
@@ -511,12 +571,22 @@ final class AppModel {
 
     // MARK: - Private
 
+    /// Serialises every session mutation (start, stop, restart, recovery attempts): each piece of work
+    /// starts after the previous one finished. Source events that arrive meanwhile are applied once
+    /// the queue is empty, so they can't interleave with a half-done start or stop.
     private func schedulePipeline(_ work: @escaping @MainActor (AppModel) async -> Void) {
         let previous = pipelineTask
+        pipelineDepth += 1
         pipelineTask = Task { [weak self] in
             await previous?.value
             guard let self else { return }
             await work(self)
+            self.pipelineDepth -= 1
+            if self.pipelineDepth == 0, self.sourceEventsWhilePipelineBusy {
+                self.sourceEventsWhilePipelineBusy = false
+                self.applySourceState()
+                self.refreshStatus()
+            }
         }
     }
 
@@ -529,6 +599,9 @@ final class AppModel {
         }
         guard wantsRunning else { return }
         phase = .starting
+        // A fresh start supersedes any recovery and anything the previous session reported.
+        endRecovery()
+        sourceInterruption = nil
         let capture = captureConfiguration
         // The recorder ignores samples until it is configured for what the source really delivers.
         recorder.suspend()
@@ -537,9 +610,9 @@ final class AppModel {
             activeCapture = active
             appliedCapture = capture
             recorder.reconfigure(recorderConfiguration)
-            recorder.resume()
-            phase = .recording
             environment.screen.setIdleTimerDisabled(true)
+            // Recording, unless the source reported an interruption while it started.
+            applySourceState()
             startStatusLoop()
             startVoiceIfNeeded()
             batteryDrain.reset(configuration: measuredConfiguration)
@@ -554,6 +627,8 @@ final class AppModel {
     /// why and offers the fix. Recovery is only ever a new `bringUp` through the pipeline: Try Again
     /// (`retryStart`) or the foreground re-check in `scenePhaseChanged(.active)`.
     private func startFailed(_ error: Error) async {
+        endRecovery()
+        sourceInterruption = nil
         appliedCapture = nil
         activeCapture = nil
         stopVoice()
@@ -569,6 +644,8 @@ final class AppModel {
     }
 
     private func tearDown(reason: InterruptionReason?) async {
+        endRecovery()
+        sourceInterruption = nil
         stopVoice()
         await environment.source.stop()
         recorder.suspend()
@@ -579,29 +656,188 @@ final class AppModel {
         refreshStatus()
     }
 
+    // MARK: Source events and recovery (issue #4; DESIGN.md "Event ordering and recovery")
+    //
+    // * One ordered channel: every `FrameSourceEvent` goes through `captureEvents` and is handled here,
+    //   in emission order. Nothing else feeds source state in; later features (frame watchdog #9,
+    //   user pause #15) read or extend this, they don't add a second stream.
+    // * One recovery entry point: `recoverCapture(_:)`. Callers: a runtime-error event, the status-loop
+    //   safety net (`reconcileCapture()`), and the frame watchdog (#9).
+    // * Every automatic path checks `automaticCaptureAllowed`; #15's explicit pause belongs there.
+
+    /// Whether automatic paths (event handling, recovery, the safety net) may bring capture back.
+    private var automaticCaptureAllowed: Bool { wantsRunning }
+
     private func handle(_ event: FrameSourceEvent) {
-        // A source that failed to start has nothing to pause or resume; keep the failure notice.
+        handledSourceEvents += 1
+        // A failed start (or a recovery that gave up) stopped the source: what it still reports is
+        // stale, and only `start()` leaves that phase. Keeps the failure notice and its Try Again.
         guard !phase.isStartFailure else { return }
         switch event {
-        case .interrupted(let reason):
+        case .interrupted(let reason): sourceInterruption = reason
+        case .interruptionEnded: sourceInterruption = nil
+        }
+        // Start, stop and recovery attempts own phase and recorder while they run; the last of them
+        // applies what the source said when it finishes (`schedulePipeline`).
+        guard pipelineDepth == 0 else {
+            sourceEventsWhilePipelineBusy = true
+            return
+        }
+        applySourceState()
+        refreshStatus()
+    }
+
+    /// Makes phase and recorder follow what the source last reported (`sourceInterruption`). Only while
+    /// capture is meant to run and has been brought up (recording, paused, or at the end of a start).
+    private func applySourceState() {
+        guard automaticCaptureAllowed else { return }
+        switch phase {
+        case .recording, .paused, .starting: break
+        case .idle, .cameraDenied, .failed: return
+        }
+        switch sourceInterruption {
+        case .runtimeError(let why)?:
+            recoverCapture(.runtimeError(why))
+        case let reason?:
+            // iOS ends ordinary interruptions itself and says so; restarting meanwhile can't help.
+            endRecovery()
             recorder.suspend()
             phase = .paused(reason.message)
-        case .interruptionEnded:
-            guard wantsRunning else { return }
+        case nil:
+            // A stale "running again" mid-recovery: wait for the restart (or the safety net) instead.
+            if recovery != nil, environment.source.runState != .running { return }
+            endRecovery()
             recorder.resume()
             phase = .recording
+            startVoiceIfNeeded()
+        }
+    }
+
+    /// **The recovery entry point** (issue #4). Suspends the recorder, says why in the phase, and — unless
+    /// a recovery is already running, whose budget then continues — asks the source to run again
+    /// (`FrameSource.resumeRunning()`) at once and then on the `RestartBackoff` schedule. It ends when
+    /// the source runs again (recording resumes), when a start, stop or ordinary interruption supersedes
+    /// it, or when the budget is spent: then capture stops and the phase becomes `.failed` with
+    /// Try Again, like a failed start (#8). Ignored unless capture is meant to run and was brought up.
+    func recoverCapture(_ reason: CaptureRecoveryReason) {
+        guard automaticCaptureAllowed else { return }
+        switch phase {
+        case .recording, .paused, .starting: break
+        case .idle, .cameraDenied, .failed: return
+        }
+        recorder.suspend()
+        phase = .paused(reason.pausedMessage)
+        guard recovery == nil else { return }
+        recoveryCounter += 1
+        recovery = CaptureRecovery(id: recoveryCounter, reason: reason)
+        scheduleRecoveryAttempt()
+    }
+
+    private func endRecovery() {
+        recovery = nil // pending timers and attempts see a different id and do nothing
+    }
+
+    /// Queues the next attempt on the pipeline after its backoff delay; gives up when the budget is spent.
+    private func scheduleRecoveryAttempt() {
+        guard var current = recovery else { return }
+        let id = current.id
+        guard let delay = current.backoff.nextDelay() else {
+            schedulePipeline { model in await model.giveUpRecovery(id) }
+            return
+        }
+        recovery = current
+        if delay <= 0 {
+            schedulePipeline { model in await model.attemptRecovery(id) }
+        } else {
+            environment.scheduler.schedule(after: delay) { [weak self] in
+                guard let self, self.recovery?.id == id else { return }
+                self.schedulePipeline { model in await model.attemptRecovery(id) }
+            }
+        }
+    }
+
+    private func attemptRecovery(_ id: Int) async {
+        guard recovery?.id == id, automaticCaptureAllowed else { return }
+        let running = await environment.source.resumeRunning()
+        // A stop, a new start or an ordinary interruption may have superseded this recovery meanwhile.
+        guard recovery?.id == id, automaticCaptureAllowed else { return }
+        if running {
+            // Its `.interruptionEnded` is in the channel too; applying it here as well means the
+            // outcome doesn't depend on which of the two is handled first.
+            endRecovery()
+            sourceInterruption = nil
+            applySourceState()
+            refreshStatus()
+        } else {
+            scheduleRecoveryAttempt()
+        }
+    }
+
+    /// Restarts didn't bring capture back: stop it and say so truthfully, with Try Again (issue #8's
+    /// `.failed` notice). Wakes the screen from Dim so the notice can be seen.
+    private func giveUpRecovery(_ id: Int) async {
+        guard let current = recovery, current.id == id, automaticCaptureAllowed else { return }
+        setDimmed(false)
+        environment.haptics.failure()
+        recorder.suspend()
+        await startFailed(FrameSourceError.restartFailed(current.reason.failureDetail))
+        refreshStatus()
+    }
+
+    /// **Safety net** (issue #4), run on every status-loop tick: repairs phase and recorder when they
+    /// disagree with what the source is actually doing, in case an event was missed or never sent.
+    /// * running, but the recorder is suspended or the phase paused → resume recording;
+    /// * interrupted, but the phase says recording → pause;
+    /// * stopped (not interrupted) while recording or paused, with no recovery running →
+    ///   `recoverCapture(.sourceStopped)`.
+    /// Does nothing while pipeline work runs or capture isn't meant to run.
+    func reconcileCapture() {
+        guard automaticCaptureAllowed, pipelineDepth == 0 else { return }
+        switch (environment.source.runState, phase) {
+        case (.running, .recording):
+            guard recorder.status().isSuspended else { return }
+            sourceInterruption = nil
+            endRecovery()
+            applySourceState()
+        case (.running, .paused):
+            sourceInterruption = nil
+            endRecovery()
+            applySourceState()
+        case (.interrupted, .recording):
+            sourceInterruption = sourceInterruption ?? .other("the camera was interrupted")
+            applySourceState()
+        case (.stopped, .recording), (.stopped, .paused):
+            guard recovery == nil else { return }
+            recoverCapture(.sourceStopped)
+        default:
+            return
         }
         refreshStatus()
     }
 
+    static let statusInterval: TimeInterval = 0.5
+
+    /// Runs `statusTick()` every `statusInterval` from the first successful start, on
+    /// `environment.scheduler` (tests advance it by hand).
     private func startStatusLoop() {
-        guard statusTask == nil else { return }
-        statusTask = Task { [weak self] in
-            while !Task.isCancelled {
-                self?.refreshStatus()
-                try? await Task.sleep(for: .milliseconds(500))
-            }
+        guard !statusLoopRunning else { return }
+        statusLoopRunning = true
+        scheduleStatusTick()
+    }
+
+    private func scheduleStatusTick() {
+        environment.scheduler.schedule(after: Self.statusInterval) { [weak self] in
+            guard let self else { return }
+            self.statusTick()
+            self.scheduleStatusTick()
         }
+    }
+
+    /// One status-loop tick: refresh what the UI shows, then the safety net. The frame watchdog (#9)
+    /// belongs here too.
+    func statusTick() {
+        refreshStatus()
+        reconcileCapture()
     }
 
     func refreshStatus() {
