@@ -30,7 +30,7 @@ Photos as one clip. The app has no network code, no accounts and no analytics.
 | Capture | `FrameSource` protocol: `CameraFrameSource` (AVCaptureSession) and `SyntheticFrameSource` (test-pattern `CVPixelBuffer`s + silent PCM) | `SyntheticFrameSource` in manual mode (frames generated as fast as the encoder takes them, with synthetic timestamps) |
 | Buffer | `RollingRecorder` (writer + segment files) and `SegmentRing` (pure eviction policy) | unit tests, no camera needed |
 | Export | `ClipExporter`: concatenate init + segments, trim with `AVMutableComposition`, passthrough export to `.mov` | unit tests load the result with `AVURLAsset` and decode every frame |
-| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore` (all protocols) | fakes in tests and in `-UITestMode` |
+| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore`, `AppSettingsOpener` (all protocols) | fakes in tests and in `-UITestMode` |
 | UI | SwiftUI; `AppModel` is the single source of truth | XCUITest with `-UITestMode` |
 
 ### Threading (Swift 6 strict concurrency)
@@ -155,6 +155,25 @@ On interruption (call, another app takes the camera, backgrounding, runtime erro
 The trade-off: a quality change (user or thermal) clears the buffer. That is simple and always
 correct. The UI says so.
 
+### What the source delivers (microphone denied)
+
+`FrameSource.start` returns an `ActiveCapture`: whether audio samples will actually reach the sink,
+and if not although they were requested, why (`.microphoneDenied`, or `.microphoneUnavailable` when
+there is no mic or its input or output can't be added). Only a missing camera throws. `AppModel.bringUp`
+suspends the recorder, starts the source, and only then configures the writer, with an audio input
+only if "Record sound" is on **and** `audioCaptured` is true. This matters because a segmenting
+`AVAssetWriter` with an audio input that never receives samples stalls: in CI (Simulator), 6 s of
+video into such a writer produced no segment at all, with real-time inputs as in the app and with
+non-real-time ones, so the buffer stayed at 0 s and every save failed with "Nothing is buffered yet". The
+same frames without the audio input produce segments (`RecorderTests.writerAudioInputWithoutSamples`
+keeps both as a regression test). When sound or the voice trigger wanted
+the microphone and didn't get it, `AppModel.microphoneNotice` produces an `AppNotice` ("Sound is off",
+"The voice trigger can't listen", or both) rendered by `NoticeBanner` with an **Open Settings** button;
+the voice trigger isn't started and its Settings row says why; the settings themselves are untouched.
+`AppNotice`/`NoticeBanner` and `AppModel.openAppSettings()` (via the `AppSettingsOpener` protocol on
+`AppEnvironment`, `FakeAppSettingsOpener` in tests) are the one "go to Settings" path, meant to be reused
+for camera access. The next start re-reads the permission, so allowing the mic and returning restores sound.
+
 ### Bounded disk
 
 Bitrates are pinned per preset (`AVVideoAverageBitRateKey`), so disk use is predictable:
@@ -223,7 +242,9 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   `Documents/FakePhotoLibrary`, and a fresh `UserDefaults` suite. A hidden-in-production label shows
   the fake library's clip count so XCUITest can check it. `FakePhotoLibrary` can deny access or fail
   the next saves; `-UITestPhotosFailOnce` makes the first save fail so a UI test can tap Retry.
-* **Not covered by CI**: `CameraFrameSource`, `AVCaptureEventInteraction` (volume buttons),
+  `-UITestDenyMicrophone` makes the synthetic source report a denied microphone and emit no audio.
+* **Not covered by CI**: `CameraFrameSource` (including the real microphone prompt and its failure
+  paths), `AVCaptureEventInteraction` (volume buttons),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),
   background-task time after locking the phone, and battery drain. See the manual checklist in the README.
 
@@ -235,7 +256,8 @@ Each change restarts the writer (new generation), and the UI shows a banner such
 * No second microphone session: a `SampleFanOut` sink passes the capture session's own audio
   samples to the recogniser (`SFSpeechAudioBufferRecognitionRequest.appendAudioSampleBuffer`).
   With voice on and "Record sound" off, the mic is captured for recognition only, and the
-  recorder's writer still has no audio track.
+  recorder's writer still has no audio track. If the microphone is denied, the trigger isn't
+  started; the microphone notice and the "Listening" row say why (§2, "What the source delivers").
 * The recognition request is recycled every 50 s, after each final result or error, and after every trigger
   (so the transcript is cleared and the phrase can't fire twice). There is a 3 s cooldown.
 * **One task at a time, by identity.** Each recognition request/task gets a generation number that

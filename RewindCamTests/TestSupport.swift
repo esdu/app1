@@ -15,20 +15,25 @@ final class RecorderHarness {
     let source: SyntheticFrameSource
     let frameRate: Int
 
-    init(buffer: Double, audio: Bool, frameRate: Int = 15, width: Int = 320, height: Int = 180,
-         videoBitrate: Int = 1_000_000) {
+    /// `audio` configures the writer; `sourceAudio` (default: same) whether the source emits audio.
+    init(buffer: Double, audio: Bool, sourceAudio: Bool? = nil, frameRate: Int = 15, width: Int = 320,
+         height: Int = 180, videoBitrate: Int = 1_000_000, realTime: Bool = false, appendWaitLimit: Double = 10) {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("RewindCamTests-\(UUID().uuidString)", isDirectory: true)
         storage = FileBufferStorage(root: root)
         storage.removeOrphans() // creates the folders
         self.frameRate = frameRate
+        var configuration = RollingRecorder.Configuration(bufferDuration: buffer, videoBitrate: videoBitrate,
+                                                          frameRate: frameRate, audioEnabled: audio,
+                                                          realTime: realTime)
+        configuration.appendWaitLimit = appendWaitLimit
         recorder = RollingRecorder(
             bufferDirectory: storage.bufferDirectory,
             clipsDirectory: storage.clipsDirectory,
-            configuration: .init(bufferDuration: buffer, videoBitrate: videoBitrate, frameRate: frameRate,
-                                 audioEnabled: audio, realTime: false))
+            configuration: configuration)
         source = SyntheticFrameSource(
-            format: .init(width: width, height: height, frameRate: frameRate, audioEnabled: audio), mode: .manual)
+            format: .init(width: width, height: height, frameRate: frameRate, audioEnabled: sourceAudio ?? audio),
+            mode: .manual)
         source.setSink(recorder)
     }
 

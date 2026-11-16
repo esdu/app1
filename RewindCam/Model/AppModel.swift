@@ -50,6 +50,9 @@ final class AppModel {
     private(set) var lastPhotosError: String?
     /// Result of the add-only Photos request made at launch (nil until answered).
     private(set) var photosAccessGranted: Bool?
+    /// What the running source actually delivers (nil while not started). The recorder's audio input
+    /// follows this, never the "Record sound" setting alone (issue #3).
+    private(set) var activeCapture: ActiveCapture?
 
     let environment: AppEnvironment
     let recorder: RollingRecorder
@@ -81,8 +84,9 @@ final class AppModel {
         recorder = RollingRecorder(
             bufferDirectory: environment.storage.bufferDirectory,
             clipsDirectory: environment.storage.clipsDirectory,
+            // No audio until a started source says it delivers some (`bringUp`).
             configuration: RollingRecorder.Configuration(bufferSeconds: loaded.bufferSeconds, preset: effective,
-                                                         audioEnabled: loaded.audioEnabled,
+                                                         audioEnabled: false,
                                                          realTime: environment.realTime))
 
         fanOut = SampleFanOut(primary: recorder)
@@ -137,9 +141,50 @@ final class AppModel {
         "\(activePreset), voice \(isVoiceListening ? "on" : "off")"
     }
 
+    /// Audio is written only if the user wants sound *and* the running source captures it. A writer
+    /// with an audio input that is never fed stalls (no segments), so this must follow the source.
     var recorderConfiguration: RollingRecorder.Configuration {
         RollingRecorder.Configuration(bufferSeconds: settings.bufferSeconds, preset: activePreset,
-                                      audioEnabled: settings.audioEnabled, realTime: environment.realTime)
+                                      audioEnabled: settings.audioEnabled && activeCapture?.audioCaptured == true,
+                                      realTime: environment.realTime)
+    }
+
+    /// Why the microphone isn't captured although sound or the voice trigger needs it (nil otherwise).
+    private var microphoneProblem: AudioUnavailableReason? {
+        guard let reason = activeCapture?.audioUnavailable,
+              settings.audioEnabled || wantsVoiceTrigger else { return nil }
+        return reason
+    }
+
+    private var wantsVoiceTrigger: Bool { settings.voiceTriggerEnabled && isVoiceAvailable }
+
+    /// Shown while capture runs without the microphone that "Record sound" or the voice trigger needs.
+    /// The settings themselves are left as the user chose them.
+    var microphoneNotice: AppNotice? {
+        guard let reason = microphoneProblem else { return nil }
+        let sound = settings.audioEnabled
+        let voice = wantsVoiceTrigger
+        let title = sound && voice ? "Sound and the voice trigger are off"
+            : sound ? "Sound is off" : "The voice trigger can't listen"
+        let consequence = sound ? ", so clips are saved without sound" : ""
+        switch reason {
+        case .microphoneDenied:
+            return AppNotice(id: "microphoneBanner", systemImage: "mic.slash.fill", title: title,
+                             message: "Microphone access is denied\(consequence). "
+                                 + "Allow it in Settings › RewindCam › Microphone.",
+                             severity: .warning, action: .openSettings)
+        case .microphoneUnavailable(let why):
+            return AppNotice(id: "microphoneBanner", systemImage: "mic.slash.fill", title: title,
+                             message: "The microphone can't be used (\(why))\(consequence).",
+                             severity: .warning, action: nil)
+        }
+    }
+
+    /// The "Listening" row in Settings.
+    var voiceListeningLabel: String {
+        if isVoiceListening { return "Yes" }
+        guard wantsVoiceTrigger, let reason = microphoneProblem else { return "No" }
+        return reason == .microphoneDenied ? "No — microphone access is denied" : "No — microphone unavailable"
     }
 
     // MARK: Lifecycle
@@ -368,6 +413,13 @@ final class AppModel {
         }
     }
 
+    // MARK: Settings app
+
+    /// Every "Open Settings" button ends here (`AppNotice.Action.openSettings`).
+    func openAppSettings() {
+        environment.appSettings.openAppSettings()
+    }
+
     // MARK: Dim mode
 
     func setDimmed(_ dimmed: Bool) {
@@ -416,11 +468,14 @@ final class AppModel {
         guard wantsRunning else { return }
         phase = .starting
         let capture = captureConfiguration
-        recorder.reconfigure(recorderConfiguration)
-        recorder.resume()
+        // The recorder ignores samples until it is configured for what the source really delivers.
+        recorder.suspend()
         do {
-            try await environment.source.start(capture)
+            let active = try await environment.source.start(capture)
+            activeCapture = active
             appliedCapture = capture
+            recorder.reconfigure(recorderConfiguration)
+            recorder.resume()
             phase = .recording
             environment.screen.setIdleTimerDisabled(true)
             startStatusLoop()
@@ -429,6 +484,7 @@ final class AppModel {
             requestPhotosAccessOnce()
         } catch {
             appliedCapture = nil
+            activeCapture = nil
             phase = .failed(error.localizedDescription)
         }
         refreshStatus()
@@ -439,6 +495,7 @@ final class AppModel {
         await environment.source.stop()
         recorder.suspend()
         appliedCapture = nil
+        activeCapture = nil
         environment.screen.setIdleTimerDisabled(false)
         phase = reason.map { .paused($0.message) } ?? .idle
         refreshStatus()
@@ -488,6 +545,9 @@ final class AppModel {
             showToast("Voice trigger needs on-device speech recognition, which this iPhone doesn't support.", isError: true)
             return
         }
+        // Without captured audio there is nothing to listen to. `microphoneNotice` and the Settings row
+        // say why; a capture restart that is already queued (voice just turned on) calls this again.
+        guard activeCapture?.audioCaptured == true else { return }
         isVoiceListening = true
         voiceSession += 1
         let session = voiceSession

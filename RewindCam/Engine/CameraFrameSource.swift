@@ -56,22 +56,32 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
         return VideoResolution.allCases.filter { Self.format(for: device, resolution: $0, fps: 30) != nil }
     }
 
-    func start(_ configuration: CaptureConfiguration) async throws {
+    func start(_ configuration: CaptureConfiguration) async throws -> ActiveCapture {
         guard await Self.requestAccess(for: .video) else { throw FrameSourceError.cameraAccessDenied }
-        var audio = false
-        if configuration.audioEnabled { audio = await Self.requestAccess(for: .audio) }
-        let audioGranted = audio
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+        // A denied microphone is not an error: capture runs video-only and says so in the result.
+        var micGranted = false
+        if configuration.audioEnabled { micGranted = await Self.requestAccess(for: .audio) }
+        let addMicrophone = micGranted
+        let deniedByUser = configuration.audioEnabled && !micGranted
+        let micProblem = try await withCheckedThrowingContinuation {
+            (cont: CheckedContinuation<AudioUnavailableReason?, Error>) in
             sessionQueue.async { [self] in
                 do {
-                    try configure(configuration, audio: audioGranted)
+                    let problem = try configure(configuration, audio: addMicrophone)
                     if !session.isRunning { session.startRunning() }
-                    cont.resume()
+                    cont.resume(returning: problem)
                 } catch {
                     cont.resume(throwing: error)
                 }
             }
         }
+        if deniedByUser {
+            return ActiveCapture(audioCaptured: false, audioUnavailable: .microphoneDenied)
+        }
+        if let micProblem {
+            return ActiveCapture(audioCaptured: false, audioUnavailable: micProblem)
+        }
+        return ActiveCapture(audioCaptured: configuration.audioEnabled, audioUnavailable: nil)
     }
 
     func stop() async {
@@ -142,7 +152,9 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
         return nil
     }
 
-    private func configure(_ configuration: CaptureConfiguration, audio: Bool) throws {
+    /// Rebuilds the session graph. Throws if video can't be captured; returns why the microphone
+    /// couldn't be added when `audio` is true (nil when it was added, or not asked for).
+    private func configure(_ configuration: CaptureConfiguration, audio: Bool) throws -> AudioUnavailableReason? {
         session.beginConfiguration()
         defer { session.commitConfiguration() }
 
@@ -190,12 +202,28 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
             }
         }
 
-        if audio, let mic = AVCaptureDevice.default(for: .audio),
-           let micInput = try? AVCaptureDeviceInput(device: mic), session.canAddInput(micInput) {
-            session.addInput(micInput)
-            audioOutput.setSampleBufferDelegate(self, queue: sampleQueue)
-            if session.canAddOutput(audioOutput) { session.addOutput(audioOutput) }
+        return audio ? addMicrophone() : nil
+    }
+
+    /// Adds the microphone input and audio output. Returns why it couldn't, leaving the session
+    /// video-only (never an input without an output, which would deliver nothing).
+    private func addMicrophone() -> AudioUnavailableReason? {
+        guard let mic = AVCaptureDevice.default(for: .audio) else { return .microphoneUnavailable("no microphone") }
+        let micInput: AVCaptureDeviceInput
+        do {
+            micInput = try AVCaptureDeviceInput(device: mic)
+        } catch {
+            return .microphoneUnavailable(error.localizedDescription)
         }
+        guard session.canAddInput(micInput) else { return .microphoneUnavailable("can't add microphone input") }
+        session.addInput(micInput)
+        audioOutput.setSampleBufferDelegate(self, queue: sampleQueue)
+        guard session.canAddOutput(audioOutput) else {
+            session.removeInput(micInput)
+            return .microphoneUnavailable("can't add audio output")
+        }
+        session.addOutput(audioOutput)
+        return nil
     }
 
     private static func map(_ reason: AVCaptureSession.InterruptionReason?) -> InterruptionReason {

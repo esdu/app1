@@ -53,6 +53,16 @@ struct SettingsView: View {
                     .accessibilityIdentifier("cameraPicker")
                     Toggle("Record sound", isOn: audioEnabled)
                         .accessibilityIdentifier("audioToggle")
+                    if let notice = model.microphoneNotice {
+                        // Same notice as the main screen's banner; the toggle keeps the user's choice.
+                        Label(notice.message, systemImage: notice.systemImage)
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                            .accessibilityIdentifier("microphoneSettingsNote")
+                        if notice.action == .openSettings {
+                            Button(AppNotice.Action.openSettings.title) { model.openAppSettings() }
+                        }
+                    }
                     if model.activePreset != model.settings.preset {
                         Label("Recording at \(model.activePreset.description) while the phone is hot.",
                               systemImage: "thermometer.high")
@@ -75,7 +85,8 @@ struct SettingsView: View {
                         .disabled(!model.isVoiceAvailable)
                         .accessibilityIdentifier("voiceToggle")
                     if model.settings.voiceTriggerEnabled {
-                        LabeledContent("Listening", value: model.isVoiceListening ? "Yes" : "No")
+                        LabeledContent("Listening", value: model.voiceListeningLabel)
+                            .accessibilityIdentifier("voiceListening")
                     }
                 } header: {
                     Text("Voice trigger")

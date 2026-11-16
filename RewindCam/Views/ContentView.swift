@@ -162,12 +162,67 @@ private struct Banners: View {
             if let error = model.status.lastError {
                 Banner(icon: "exclamationmark.circle", text: error, tint: .red)
             }
+            if let notice = model.microphoneNotice {
+                NoticeBanner(notice: notice)
+            }
             if !model.unsavedClips.isEmpty {
                 UnsavedClipsBanner()
             } else if model.photosAccessGranted == false {
                 Banner(icon: "photo.badge.exclamationmark", text: AppModel.photosDeniedHint, tint: .orange)
                     .accessibilityIdentifier("photosDeniedBanner")
             }
+        }
+    }
+}
+
+/// Renders an `AppNotice`: icon, title, message and its action button (e.g. **Open Settings**).
+/// Reusable for any notice; the banner's identifier is `notice.id`, the button's is
+/// `notice.action.accessibilityIdentifier` (`openSettingsButton`).
+struct NoticeBanner: View {
+    @Environment(AppModel.self) private var model
+    let notice: AppNotice
+
+    var body: some View {
+        let tint: Color = notice.severity == .error ? .red : .orange
+        HStack(spacing: 10) {
+            Image(systemName: notice.systemImage)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(notice.title)
+                    .fontWeight(.semibold)
+                Text(notice.message)
+                    .font(.caption)
+                    .opacity(0.9)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityElement(children: .combine)
+            if let action = notice.action {
+                Button {
+                    perform(action)
+                } label: {
+                    Text(action.title)
+                        .fontWeight(.bold)
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(tint)
+                .controlSize(.small)
+                .accessibilityIdentifier(action.accessibilityIdentifier)
+            }
+        }
+        .font(.footnote.weight(.medium))
+        .foregroundStyle(.white)
+        .padding(10)
+        .background(tint.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(tint.opacity(0.8), lineWidth: 1))
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(notice.id)
+    }
+
+    private func perform(_ action: AppNotice.Action) {
+        switch action {
+        case .openSettings: model.openAppSettings()
         }
     }
 }
