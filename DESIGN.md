@@ -138,7 +138,121 @@ The aim is that once Save has produced a clip, nothing but a successful Photos i
 | `UnsavedClips/` | Application Support, excluded from backup | `*.partial.mov` (export in progress), `*.mov` (finished, not yet in Photos) | `.partial.mov` deleted on launch; `.mov` deleted only after Photos accepts it |
 
 `BufferStorage` (`FileBufferStorage`) owns these paths. Tests point it at temp folders, and the
-model tests treat "a new `AppModel` on the same storage" as a relaunch.
+model tests treat "a new `AppModel` on the same storage" as a relaunch. Each folder's protection
+class and backup policy are in "File protection and backup" below.
+
+### File protection and backup
+
+**Decision.** Every media file and folder uses Data Protection class
+`completeUntilFirstUserAuthentication` ("available after first unlock"), the iOS default for app files.
+It is now set explicitly through one helper, `FileProtectionPolicy`, instead of being left implicit.
+Nothing uses `.complete` or `.completeUnlessOpen`. The durable folder `UnsavedClips/` is excluded from
+backup; the expendable folders stay in Caches, which iOS never backs up. This keeps #1's goal: a save
+started before the phone locks can finish, or at least keep its clip, while the phone is locked.
+
+**What iOS does on lock.** Locking the phone sends RewindCam to the background. iOS doesn't let it use
+the camera there, so capture stops: the writer is cancelled, the ring folder is deleted, and a pending
+save resolves early with what is already linked (§ Interruptions). From then on no buffer file is
+written. The save itself keeps running inside its `beginBackgroundTask` assertion (typically about 30 s,
+not guaranteed), and *after* the lock it must:
+
+1. reopen the hard-linked `init.mp4` and segments (same inodes as the ring files) to concatenate them;
+2. create `source.mp4`, close it, then reopen it with `AVURLAsset`;
+3. have `AVAssetExportSession` create and write `<name>.partial.mov`, then reopen it to read the duration;
+4. rename it to `.mov`, hard-link it into `photos-<uuid>/`, and let Photos read (and move) that link.
+
+What each class allows after the lock ([Apple: Encrypting your app's files](https://developer.apple.com/documentation/uikit/encrypting-your-app-s-files),
+[`FileProtectionType`](https://developer.apple.com/documentation/foundation/fileprotectiontype),
+[Apple Platform Security: Data Protection classes](https://support.apple.com/guide/security/secb010e978a/web)):
+
+| Class | After the phone locks | Steps 1–4 |
+|---|---|---|
+| `.complete` | the class key is discarded about 10 s after the lock; no file in the class can be read or written, even one already open | all fail if the save outlasts those ~10 s (post-roll, a long or 4K export) |
+| `.completeUnlessOpen` | files can be created and an open file stays usable, but a closed file can't be reopened | 1, 2 (reopen), 3 (reopen) and 4 (Photos opens the file) fail |
+| `.completeUntilFirstUserAuthentication` | readable and writable from the first unlock after boot until shutdown, locked or not | all work |
+
+So `.complete` or `.completeUnlessOpen` would turn "lock the phone during a save" from "the clip is in
+Photos or kept for Retry" into "export failed" (#5, "Considered and left out"). Launch and recovery need
+no more than that: RewindCam has no background modes, so iOS never runs it before the first unlock, and
+launch cleanup and the Retry list only read names and sizes (file-system metadata, which the class
+doesn't protect).
+
+**Inventory.**
+
+| Files | Where | Created by | Kind | Needed while locked | Class: how it is ensured | Backup | Cleanup |
+|---|---|---|---|---|---|---|---|
+| ring generation `gen-N/` | `Caches/RewindBuffer/` | `RollingRecorder` via `FileProtectionPolicy.prepareDirectory` | disposable | no new writes, but its files are the save job's inodes | set on the folder | no (Caches) | on interruption, quality change, launch |
+| `init.mp4`, `seg-*.m4s` | `gen-N/` | `Data.write` (plain, not atomic) from the writer delegate | disposable | yes, through the save job's links (step 1) | inherited from `gen-N/` | no (Caches) | evicted by the ring; launch |
+| save job `save-<uuid>/` with linked `init.mp4` and segments | `Caches/RewindClips/` | `prepareDirectory` + `linkOrCopy` | disposable (save in flight) | yes (step 1) | a hard link *is* the ring file (same inode, same class); the copy fallback is a new file and gets the class set explicitly (`FileProtectionPolicy.copyItem`) | no (Caches) | when the export ends; launch |
+| `source.mp4` | `save-<uuid>/` | `ClipExporter.concatenate` (`createFile` + `FileHandle`) | disposable | yes (step 2) | inherited from `save-<uuid>/` | no (Caches) | when the export ends; launch |
+| `<name>.partial.mov` | `Application Support/UnsavedClips/` | `AVAssetExportSession` | disposable until renamed | yes (step 3) | inherited from `UnsavedClips/`, then set explicitly in `commitPartialClip` (framework-created file) | excluded | on export failure; launch |
+| `<name>.mov` | `UnsavedClips/` | rename of the partial (same inode, class kept) | **committed user save** | yes (step 4: the save's own Photos import) | set before the rename; re-applied to every kept clip at launch (`removeOrphans`) | excluded | only after Photos reports success, never otherwise |
+| `photos-<uuid>/<name>.mov` | `Caches/RewindClips/` | `stageForPhotos` (`prepareDirectory` + `linkOrCopy`) | disposable link (the kept `.mov` is what matters) | yes (step 4) | the link is the kept clip's inode; copy fallback set explicitly | no (Caches) | after each Photos attempt; launch |
+| folders `UnsavedClips/`, `RewindBuffer/`, `RewindClips/` | | `FileProtectionPolicy.prepareDirectory` | folders | yes | set explicitly, re-applied at every launch | `UnsavedClips/` excluded, re-marked before every export | never removed |
+
+Photos-owned copies are never touched: once Photos accepts a clip, the app only deletes its own `.mov`.
+
+**How the class is ensured, and checked.**
+
+* *Folders* get the class explicitly, and files created inside inherit their folder's class (Apple DTS:
+  "Files written to a directory default to that directory's data protection",
+  [forum thread 706258](https://developer.apple.com/forums/thread/706258)). Plain `Data.write`,
+  `createFile` and `FileHandle` writes rely on this.
+* *Hard links* share one inode, so one class. They are never treated as separate copies, and setting
+  the class through either name changes both. Tests check inode numbers and link counts.
+* *Copies* (the link-failure fallback) are new files, which developers report don't reliably inherit,
+  so they get the class set explicitly.
+* *Atomic writes and framework output* (a temporary file renamed into place, or whatever
+  `AVAssetExportSession` does internally) may take their class from wherever the temporary file was
+  created. The app makes no atomic writes to media, and `commitPartialClip` sets the class on the export
+  before renaming it. A rename (`moveItem` within one volume) keeps the inode and its class.
+* Setting a class is best effort (`FileProtectionPolicy.apply` returns false and never fails a save).
+  If it fails, the file keeps the platform default, which is the same class. Being explicit matters if
+  the app-wide default is ever raised (the Data Protection capability, entitlement
+  `com.apple.developer.default-data-protection`): RewindCam's folders would keep the lock-safe class
+  instead of silently breaking saves after a lock.
+* `FileProtectionTests` creates every file kind above through the real code paths (ring writes,
+  `linkOrCopy`, the copy fallback, `concatenate`, an atomic write committed with `commitPartialClip`,
+  `stageForPhotos`) and reads back `URLResourceValues.fileProtection`; wherever the file system reports a
+  class, it must be the media class. **The Simulator does not enforce Data Protection**: a "locked"
+  Simulator still reads every file, and its file system may not report a class at all. Lock behaviour
+  is a device check (README checklist).
+
+**Errors.** With this class a protected-data error can only happen before the first unlock, when
+RewindCam can't run. If one happened anyway (for example after a future class change), it surfaces as a
+failed export ("Export failed: …"; the partial is deleted and nothing claims success) or as a failed
+Photos import (the `.mov` is kept and offered for Retry). No error path deletes a committed `.mov`.
+
+**Backup.**
+
+* `Caches/RewindBuffer/` and `Caches/RewindClips/` hold only disposable data. iCloud Backup excludes
+  Caches ([Apple: Optimizing your app's data for iCloud backup](https://developer.apple.com/documentation/foundation/optimizing-your-app-s-data-for-icloud-backup)),
+  iOS may purge it when storage is low, and the app wipes it at launch anyway.
+* `Application Support/UnsavedClips/` holds committed saves, so it is outside Caches and never
+  auto-deleted. It is marked `isExcludedFromBackup` (on the folder, which covers its contents; Apple notes
+  that some file operations reset the flag, so it is re-marked at launch and before every export).
+  Why excluded: clips are large (up to ~0.9 GB each) and are meant to stay only until Photos has them;
+  Photos is where the user's backup (iCloud Photos or a device backup) takes over.
+* The user's side of that: a clip still waiting in RewindCam is **not** in a device backup and does not
+  move to a new or restored phone. The banner and Retry exist to get it into Photos; the README says so.
+
+**Risks and trade-offs.**
+
+* "Available after first unlock" means a phone that was unlocked once since boot and then locked (and,
+  say, stolen) still holds the class key in memory. Kept clips are the most sensitive files here and the
+  ones that can stay longest.
+  *Possible follow-up, not enabled:* raise kept `.mov` files to `.complete` after their first Photos
+  attempt fails, and lower them again before a Retry. Costs: a Retry started just before a lock fails
+  after ~10 s (the clip is kept, nothing lost); the class can only be changed while unlocked; and a Photos
+  import that holds a link to the same inode could end up with a `.complete` file. It is a trade-off for
+  the owner to choose, not a silent default.
+* Photos imports with `shouldMoveFile`, so it moves the staged hard link and may change the shared
+  inode's attributes. The app never sets anything on a clip Photos has accepted (it only deletes its own
+  name) and re-applies the media class to kept clips at launch.
+* `isExcludedFromBackup` is a hint, not a guarantee (Apple).
+* Background time (about 30 s, at the system's discretion) still limits a save after a lock, whatever
+  the class: a save killed before its rename loses that clip (§ Save path: durability).
+* None of this has been checked on a device yet.
 
 ### Interruptions and generations
 
@@ -225,7 +339,8 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   the next saves; `-UITestPhotosFailOnce` makes the first save fail so a UI test can tap Retry.
 * **Not covered by CI**: `CameraFrameSource`, `AVCaptureEventInteraction` (volume buttons),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),
-  background-task time after locking the phone, and battery drain. See the manual checklist in the README.
+  background-task time after locking the phone, Data Protection (the Simulator doesn't enforce it),
+  and battery drain. See the manual checklist in the README.
 
 ## 6. Voice trigger (stretch)
 

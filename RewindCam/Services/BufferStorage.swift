@@ -8,6 +8,9 @@ import Foundation
 /// | `bufferDirectory` | `Caches/RewindBuffer` | the rolling ring (one folder per writer generation) | wiped |
 /// | `clipsDirectory` | `Caches/RewindClips` | save job folders (`save-*`) and Photos staging links (`photos-*`) | wiped |
 /// | `unsavedDirectory` | `Application Support/UnsavedClips`, excluded from backup | finished clips not yet in Photos (`*.mov`) and exports in progress (`*.partial.mov`) | `*.partial.mov` deleted, `*.mov` kept |
+///
+/// Every folder and file here uses `FileProtectionPolicy.media` (available after first unlock), so a save
+/// can finish while the phone is locked. See DESIGN.md §2, "File protection and backup".
 protocol BufferStorage: Sendable {
     var bufferDirectory: URL { get }
     var clipsDirectory: URL { get }
@@ -38,14 +41,11 @@ enum UnsavedClipFiles {
 // MARK: - Unsaved clips (finished, not yet in Photos)
 
 extension BufferStorage {
-    /// Creates `unsavedDirectory` if needed and marks it excluded from iCloud/iTunes backup
-    /// (clips can be large and are meant to be transient; a failure to mark it never blocks a save).
+    /// Creates `unsavedDirectory` if needed, with the media protection class, and marks it excluded
+    /// from iCloud/Finder backup (clips can be large and are meant to be transient until Photos has them;
+    /// a failure to set either never blocks a save). Re-applied before every export.
     func prepareUnsavedDirectory() throws {
-        try FileManager.default.createDirectory(at: unsavedDirectory, withIntermediateDirectories: true)
-        var values = URLResourceValues()
-        values.isExcludedFromBackup = true
-        var dir = unsavedDirectory
-        try? dir.setResourceValues(values)
+        try FileProtectionPolicy.prepareDirectory(unsavedDirectory, excludedFromBackup: true)
     }
 
     /// Where an export in progress should write: `<unsaved>/<baseName>.partial.mov` (any stale one is removed).
@@ -57,9 +57,11 @@ extension BufferStorage {
     }
 
     /// Renames a complete export from `.partial.mov` to `.mov`, never overwriting an existing clip
-    /// (`name.mov`, then `name-2.mov`, …).
+    /// (`name.mov`, then `name-2.mov`, …). The export was written by `AVAssetExportSession`, so the
+    /// media protection class is set on it explicitly first; the rename keeps the inode, and the class.
     func commitPartialClip(_ partial: URL) throws -> UnsavedClip {
         let fm = FileManager.default
+        FileProtectionPolicy.apply(to: partial)
         let file = partial.lastPathComponent
         let base = file.hasSuffix(UnsavedClipFiles.partialSuffix)
             ? String(file.dropLast(UnsavedClipFiles.partialSuffix.count))
@@ -86,9 +88,11 @@ extension BufferStorage {
 
     /// Hard-links the clip into a fresh `clipsDirectory/photos-<uuid>/` folder (copies if linking fails),
     /// so `PhotoLibrary.saveVideo` may move or consume the file without touching the kept copy.
+    /// The link is the same inode as the kept clip, so it has the same protection class; a copy gets
+    /// the media class set explicitly (`RollingRecorder.linkOrCopy`).
     func stageForPhotos(_ clip: UnsavedClip) throws -> URL {
         let dir = clipsDirectory.appendingPathComponent("photos-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileProtectionPolicy.prepareDirectory(dir)
         let staged = dir.appendingPathComponent(clip.name)
         do {
             try RollingRecorder.linkOrCopy(clip.url, to: staged)
@@ -138,23 +142,34 @@ struct FileBufferStorage: BufferStorage {
     var clipsDirectory: URL { root.appendingPathComponent("RewindClips", isDirectory: true) }
     var unsavedDirectory: URL { durableRoot.appendingPathComponent("UnsavedClips", isDirectory: true) }
 
+    /// Expendable folders: in Caches (never backed up, may be purged by iOS), wiped on every launch.
+    var volatileDirectories: [URL] { [bufferDirectory, clipsDirectory] }
+    /// Folders holding user saves: outside Caches, excluded from backup, never wiped.
+    var durableDirectories: [URL] { [unsavedDirectory] }
+
     /// Wipes the ring and save job folders (Caches), and deletes stray `.partial.mov` exports.
     /// Finished clips in `unsavedDirectory` are never removed here: they are offered for retry.
+    /// Also (re)applies the media protection class to every folder and to each kept clip, so files
+    /// written by an older version, or touched by a failed Photos import, end up with the intended class.
     @discardableResult
     func removeOrphans() -> Int {
         let fm = FileManager.default
         var removed = 0
-        for dir in [bufferDirectory, clipsDirectory] {
+        for dir in volatileDirectories {
             let items = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? []
             for item in items where (try? fm.removeItem(at: item)) != nil {
                 removed += 1
             }
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            try? FileProtectionPolicy.prepareDirectory(dir)
         }
         try? prepareUnsavedDirectory()
         let kept = (try? fm.contentsOfDirectory(at: unsavedDirectory, includingPropertiesForKeys: nil)) ?? []
-        for item in kept where UnsavedClipFiles.isPartial(item) && (try? fm.removeItem(at: item)) != nil {
-            removed += 1
+        for item in kept {
+            if UnsavedClipFiles.isPartial(item) {
+                if (try? fm.removeItem(at: item)) != nil { removed += 1 }
+            } else if UnsavedClipFiles.isFinished(item) {
+                FileProtectionPolicy.apply(to: item)
+            }
         }
         return removed
     }

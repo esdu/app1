@@ -285,7 +285,7 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
             let start = tap - configuration.bufferDuration
             let dir = clipsDirectory.appendingPathComponent("save-\(UUID().uuidString)", isDirectory: true)
             do {
-                try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+                try FileProtectionPolicy.prepareDirectory(dir)
                 let initCopy = dir.appendingPathComponent("init.mp4")
                 try Self.linkOrCopy(initURL, to: initCopy)
                 let p = PendingSave(ticket: ticket, generationID: g.id, start: start, end: end,
@@ -382,7 +382,7 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         let id = generationCounter
         let dir = bufferDirectory.appendingPathComponent("gen-\(id)", isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            try FileProtectionPolicy.prepareDirectory(dir)
         } catch {
             lastError = "Can't create buffer folder: \(error.localizedDescription)"
             return nil
@@ -550,11 +550,13 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         statusBox.withLock { $0 = snapshot }
     }
 
+    /// A hard link shares the source's inode, and so its protection class. A copy is a new file and
+    /// gets the media class set explicitly (`FileProtectionPolicy`).
     static func linkOrCopy(_ src: URL, to dest: URL) throws {
         do {
             try FileManager.default.linkItem(at: src, to: dest)
         } catch {
-            try FileManager.default.copyItem(at: src, to: dest)
+            try FileProtectionPolicy.copyItem(at: src, to: dest)
         }
     }
 }
