@@ -207,6 +207,16 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     /// Lock-protected snapshot; safe to call from the main thread at any rate.
     func status() -> RecorderStatus { statusBox.current }
 
+    /// Status plus the segment files actually on disk, read together on the recorder queue
+    /// (segments land asynchronously, so separate reads can disagree by one segment).
+    func diskSnapshot() -> (status: RecorderStatus, segmentFiles: [URL], bytes: Int64) {
+        queue.sync {
+            publish()
+            let files = FileBufferStorage.files(in: bufferDirectory, withExtension: "m4s")
+            return (statusBox.current, files, FileBufferStorage.directorySize(bufferDirectory))
+        }
+    }
+
     // MARK: SampleSink
 
     func consume(_ sampleBuffer: CMSampleBuffer, kind: MediaKind) {

@@ -14,20 +14,21 @@ struct RecorderTests {
         var maxBytes: Int64 = 0
         for _ in 0..<10 {
             h.source.generate(seconds: 30)
-            maxBytes = max(maxBytes, h.bufferBytesOnDisk)
-            #expect(h.bufferBytesOnDisk <= h.byteCap)
+            let bytes = h.recorder.diskSnapshot().bytes
+            maxBytes = max(maxBytes, bytes)
+            #expect(bytes <= h.byteCap)
         }
         let now = h.now
         #expect(abs(now - h.source.nextVideoPTS.seconds) < 0.001)
         try await h.waitForSegments(through: now - 2)
 
-        let status = h.recorder.status()
+        let (status, files, bytes) = h.recorder.diskSnapshot()
         #expect(status.bufferedSeconds >= 30, "buffered \(status.bufferedSeconds)")
         #expect(status.bufferedSeconds < 32, "buffered \(status.bufferedSeconds)")
         // Only the retained segments exist on disk: nothing leaked.
-        #expect(h.segmentFilesOnDisk.count == status.segmentCount)
+        #expect(files.count == status.segmentCount)
         #expect(status.segmentCount >= 28 && status.segmentCount <= 34, "segments \(status.segmentCount)")
-        #expect(h.bufferBytesOnDisk <= h.byteCap, "disk \(h.bufferBytesOnDisk) cap \(h.byteCap)")
+        #expect(bytes <= h.byteCap, "disk \(bytes) cap \(h.byteCap)")
         #expect(maxBytes <= h.byteCap)
         #expect(status.lastSegmentEnd! > now - 3)
     }
@@ -143,10 +144,10 @@ struct RecorderTests {
         var config = h.recorder.currentConfiguration
         config.bufferDuration = 15
         h.recorder.reconfigure(config)
-        let status = h.recorder.status()
+        let (status, files, _) = h.recorder.diskSnapshot()
         #expect(status.generation == generation)
         #expect(status.bufferedSeconds >= 15 && status.bufferedSeconds < 17, "buffered \(status.bufferedSeconds)")
-        #expect(h.segmentFilesOnDisk.count == status.segmentCount)
+        #expect(files.count == status.segmentCount)
     }
 
     @Test("Only one save can be pending at a time")
