@@ -72,6 +72,7 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - Only one save can be pending at a time. A second tap during post-roll says "Already saving".
 - **Clips that didn't reach Photos** take their full size in the app's storage until a Retry succeeds.
   There is no in-app way to delete or share them yet; allow Photos access and tap Retry.
+  (A small in-app list for them is proposed in [docs/decisions/clip-library.md](docs/decisions/clip-library.md).)
 - **Clips that didn't reach Photos are not backed up** and don't move to a new or restored phone: they
   are excluded from iCloud/device backup until Photos has them. All media files use the iOS default
   Data Protection class ("available after first unlock"), set explicitly so a save can finish while the
