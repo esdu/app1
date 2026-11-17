@@ -73,6 +73,9 @@ final class AppModel {
     private(set) var supportedResolutions: [VideoResolution]
     private(set) var orphansRemoved = 0
     private(set) var isVoiceListening = false
+    /// The voice trigger stopped itself because speech recognition kept failing (issue #36). Cleared
+    /// when it starts again (the next time recording starts or resumes) or is turned off.
+    private(set) var voiceRecognitionFailed = false
     private(set) var batteryDrain = BatteryDrainMeter()
     /// Finished clips that haven't reached Photos (kept in `storage.unsavedDirectory`), offered for retry.
     private(set) var unsavedClips: [UnsavedClip] = []
@@ -466,9 +469,14 @@ final class AppModel {
     /// The "Listening" row in Settings.
     var voiceListeningLabel: String {
         if isVoiceListening { return "Yes" }
-        guard wantsVoiceTrigger, let reason = microphoneProblem else { return "No" }
-        return reason == .microphoneDenied ? "No — microphone access is denied" : "No — microphone unavailable"
+        if wantsVoiceTrigger, let reason = microphoneProblem {
+            return reason == .microphoneDenied ? "No — microphone access is denied" : "No — microphone unavailable"
+        }
+        return voiceRecognitionFailed ? "No — \(Self.speechRecognitionUnavailable)" : "No"
     }
+
+    /// Why the voice trigger stopped itself (issue #36): the "Listening" row and the toast.
+    static let speechRecognitionUnavailable = "speech recognition isn't available"
 
     // MARK: Lifecycle
 
@@ -609,7 +617,12 @@ final class AppModel {
         environment.settingsStore.save(new)
         applyQuality()
         if new.voiceTriggerEnabled != old.voiceTriggerEnabled {
-            if new.voiceTriggerEnabled { startVoiceIfNeeded() } else { stopVoice() }
+            if new.voiceTriggerEnabled {
+                startVoiceIfNeeded()
+            } else {
+                stopVoice()
+                voiceRecognitionFailed = false // turning it on again is a fresh try
+            }
         }
     }
 
@@ -1551,6 +1564,7 @@ final class AppModel {
         // say why; a capture restart that is already queued (voice just turned on) calls this again.
         guard activeCapture?.audioCaptured == true else { return }
         isVoiceListening = true
+        voiceRecognitionFailed = false
         voiceSession += 1
         let session = voiceSession
         Task {
@@ -1563,12 +1577,27 @@ final class AppModel {
                 return
             }
             fanOut.setTap(voice)
-            voice.start { [weak self] in
+            voice.start(onTrigger: { [weak self] in
                 guard let self else { return }
                 Task { @MainActor in self.save(trigger: .voice) }
-            }
+            }, onGiveUp: { [weak self] in
+                guard let self else { return }
+                Task { @MainActor in self.voiceGaveUp(session) }
+            })
             batteryDrain.reset(configuration: measuredConfiguration)
         }
+    }
+
+    /// The trigger gave up after its restart budget (issue #36; DESIGN.md §6): recognition sessions kept
+    /// failing. Listening is off and says why in Settings; one toast tells the user (and VoiceOver) once.
+    /// Recording and Save are unaffected. The next start (recording starts or resumes, or the trigger
+    /// is turned off and on) tries again with a fresh budget.
+    private func voiceGaveUp(_ session: Int) {
+        // A stop, pause or newer start since then owns the state (every one bumps `voiceSession`).
+        guard session == voiceSession, isVoiceListening else { return }
+        stopVoice()
+        voiceRecognitionFailed = true
+        showToast("The voice trigger stopped: \(Self.speechRecognitionUnavailable).", isError: true)
     }
 
     private func stopVoice() {

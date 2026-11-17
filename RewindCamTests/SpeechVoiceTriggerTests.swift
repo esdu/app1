@@ -36,21 +36,45 @@ final class FakeRecognitionEngine: RecognitionEngine, @unchecked Sendable {
         func say(_ text: String, isFinal: Bool = false) { onUpdate(RecognitionUpdate(transcript: text, isFinal: isFinal)) }
     }
 
+    /// What `startSession` does (issue #36).
+    enum StartBehaviour: Sendable {
+        /// Returns a session whose callbacks the test delivers.
+        case normal
+        /// Returns nil, like `SpeechRecognitionEngine` when it can't make a task.
+        case returnsNil
+        /// The new task reports an error from inside `startSession`, before the trigger stores it.
+        case failsWhileStarting
+    }
+
     let isAvailable: Bool
     private let errorOnCancel: Bool
     private let sessionsBox = Locked<[Session]>([])
+    private let control = Locked((behaviour: StartBehaviour.normal, startAttempts: 0))
 
     init(isAvailable: Bool = true, errorOnCancel: Bool = false) {
         self.isAvailable = isAvailable
         self.errorOnCancel = errorOnCancel
     }
 
+    /// Sessions handed out (not counting nil results).
     var sessions: [Session] { sessionsBox.current }
+    /// Calls to `startSession`, including those that returned nil.
+    var startAttempts: Int { control.current.startAttempts }
+
+    var behaviour: StartBehaviour {
+        get { control.current.behaviour }
+        set { control.withLock { $0.behaviour = newValue } }
+    }
 
     func startSession(onUpdate: @escaping @Sendable (RecognitionUpdate) -> Void) -> (any RecognitionSession)? {
-        guard isAvailable else { return nil }
+        let behaviour = control.withLock { c -> StartBehaviour in
+            c.startAttempts += 1
+            return c.behaviour
+        }
+        guard isAvailable, behaviour != .returnsNil else { return nil }
         let session = Session(errorOnCancel: errorOnCancel, onUpdate: onUpdate)
         sessionsBox.withLock { $0.append(session) }
+        if behaviour == .failsWhileStarting { session.deliver(RecognitionUpdate(failed: true)) }
         return session
     }
 }
@@ -242,8 +266,8 @@ struct SpeechVoiceTriggerTests {
     }
 }
 
-/// A short buffer of 16 kHz mono silence.
-private func makeSilentAudioSample() -> CMSampleBuffer? {
+/// A short buffer of 16 kHz mono silence (also used by `VoiceTriggerFailureTests`).
+func makeSilentAudioSample() -> CMSampleBuffer? {
     var asbd = AudioStreamBasicDescription(
         mSampleRate: 16_000, mFormatID: kAudioFormatLinearPCM,
         mFormatFlags: kLinearPCMFormatFlagIsSignedInteger | kLinearPCMFormatFlagIsPacked,
