@@ -97,19 +97,42 @@ struct RecordingSettings: Codable, Equatable, Sendable {
     }
 }
 
-/// Persistence boundary for settings (mocked in tests with an isolated suite).
+/// Persistence boundary for settings (mocked in tests with an isolated suite). It also keeps the one
+/// piece of screen state that has to outlive the process: the brightness Dim must put back (issue #38).
 protocol SettingsStore: AnyObject {
     func load() -> RecordingSettings
     func save(_ settings: RecordingSettings)
+    /// The screen brightness from before Dim lowered it (0...1). Written just before the system brightness
+    /// goes down, cleared (`nil`) once it is back, so a value found at launch means the last run ended
+    /// while dimmed (kill, crash, memory pressure) and the screen may still be at 2 % (`AppModel`, "Dim").
+    func loadDimRestoreBrightness() -> Double?
+    func saveDimRestoreBrightness(_ brightness: Double?)
 }
 
 final class UserDefaultsSettingsStore: SettingsStore {
     private let defaults: UserDefaults
     private let key: String
+    private let dimRestoreKey: String
 
-    init(defaults: UserDefaults = .standard, key: String = "recordingSettings.v1") {
+    init(defaults: UserDefaults = .standard, key: String = "recordingSettings.v1",
+         dimRestoreKey: String = "dimRestoreBrightness.v1") {
         self.defaults = defaults
         self.key = key
+        self.dimRestoreKey = dimRestoreKey
+    }
+
+    func loadDimRestoreBrightness() -> Double? {
+        guard let value = defaults.object(forKey: dimRestoreKey) as? Double,
+              value.isFinite, (0...1).contains(value) else { return nil }
+        return value
+    }
+
+    func saveDimRestoreBrightness(_ brightness: Double?) {
+        if let brightness {
+            defaults.set(brightness, forKey: dimRestoreKey)
+        } else {
+            defaults.removeObject(forKey: dimRestoreKey)
+        }
     }
 
     func load() -> RecordingSettings {

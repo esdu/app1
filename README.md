@@ -44,7 +44,11 @@ source, because the Simulator has no camera.*
 **Long sessions**
 
 - The screen stays awake while recording. **Dim** drops brightness to 2 % under a black overlay; recording
-  continues, the volume buttons still save, and you tap anywhere to wake. Battery level is shown.
+  continues, the volume buttons still save, and you tap anywhere to wake. While iOS shows something over
+  RewindCam (a full-screen call, Control Center, Notification Centre, an alert, the app switcher) the
+  brightness goes back to your level, and drops again when you return; the overlay stays. Waking puts
+  your level back unless you or auto-brightness changed it meanwhile, and if RewindCam is killed or
+  crashes while dimmed, the next launch puts it back. Battery level is shown.
 - **Thermal step-down**: when the phone gets hot, RewindCam lowers the quality and says so ("Phone is
   hot — recording at 720p 30 fps until it cools down."); your setting comes back when it cools.
 - **Pause / Resume**: RewindCam starts recording on launch and resumes on its own, but you can tap
@@ -127,6 +131,12 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - **A save resolves about 1 s after the tap** (plus any post-roll), when the segment containing the tap
   is complete. The clip still ends exactly at the tap. If less than the buffer length has been recorded
   (for example just after launch), the clip is whatever exists.
+- **Notification banners while dimmed are drawn at 2 %.** A banner (and possibly the compact
+  incoming-call banner) appears over RewindCam without making it inactive, and iOS gives an app no way
+  to know a banner is showing, so the brightness stays down; wake the screen to read it. A full-screen
+  call, Control Center, Notification Centre and alerts are readable (the brightness comes back).
+- **After a kill or crash while dimmed** the screen can stay at 2 % until RewindCam is opened again (or
+  until the phone is locked, if iOS restores it then); the next launch puts your brightness back, once.
 - **One save at a time.** Until a save has finished (post-roll, export and the Photos import), another
   Save, volume-button press or voice trigger shows "Already saving — hold on…" and saves nothing.
 - **A pause lasts until Resume or until RewindCam is relaunched**: it isn't saved, so a relaunch (also
@@ -188,6 +198,8 @@ the synthetic source and fakes. These are covered only by the [manual checklist]
 - free space on a really full phone, real write failures, and peak memory and storage at 4K60 (the
   bounds are tested with simulated slow and full storage);
 - thermal step-down, battery drain and long sessions;
+- real screen brightness with Dim (#38): what iOS shows at which brightness during a call, Control
+  Center or an alert, whether the brightness stays at 2 % after a kill, and its restore on relaunch;
 - the speech recogniser;
 - real VoiceOver speech, the large content viewer and changing the text size while the app runs (CI runs
   the Xcode accessibility audit and the largest text size, screenshots `a11y-*`);
@@ -372,6 +384,21 @@ a missing clip with no banner, and never "Export failed".
 - [ ] **Dim**: tap the moon. **Pass:** the screen goes nearly black and shows "Recording · N s ready",
       "Tap anywhere to wake" and "Volume buttons still save"; the counter keeps climbing; a volume-button
       press saves a clip without waking the screen; a tap wakes it and the brightness comes back.
+- [ ] **Dim and system screens** (#38): set brightness to about half, dim, then (1) open Control Center,
+      (2) pull down Notification Centre, (3) swipe up to the app switcher and back, (4) have someone call
+      the phone (Settings › Phone › Incoming Calls: Full Screen; also try Banner and note what you see).
+      **Pass:** each system screen, and who is calling, is readable at your normal brightness; back in
+      RewindCam the overlay is still up, the screen is dark again and the counter kept climbing; a tap
+      wakes it to your level. In Control Center, drag brightness to a different level, close it, then
+      wake: the level you dragged to stays.
+- [ ] **Dim, then change brightness** (#38): dim, open Control Center, close it, then with the screen dark
+      raise brightness from Control Center again (or let auto-brightness move it) and wake. **Pass:** the
+      level you or auto-brightness set stays; it doesn't jump back to the level from before dimming.
+- [ ] **Force-quit while dimmed** (#38): brightness about half, dim, swipe up to the app switcher and
+      swipe RewindCam away. Note the Home Screen brightness. Reopen RewindCam (without locking the phone
+      first). **Pass:** on relaunch the brightness is back to about half, it isn't dimmed, and it records;
+      quit and reopen once more: the brightness doesn't change. Repeat locking the phone before reopening
+      and note whether iOS had already put the brightness back (then RewindCam leaves it).
 - [ ] **Thermal**: warm the phone (4K at 60 fps, in the sun, while charging). **Pass:** when RewindCam's
       Settings shows "Phone temperature: Hot", an orange "Phone is hot — recording at … until it cools
       down." banner shows and the quality pill drops; when it shows Normal or Warm again, the banner
