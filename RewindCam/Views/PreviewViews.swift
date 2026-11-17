@@ -30,7 +30,10 @@ struct PreviewSurface: View {
     let model: AppModel
 
     var body: some View {
-        if let session = model.captureSession {
+        if model.isUserPaused {
+            // Paused (issue #15): no frozen last frame that could pass for a live picture.
+            Color.black
+        } else if let session = model.captureSession {
             CameraPreview(session: session)
         } else if let image = model.previewImage {
             // Overlay + clip so an aspect-fill image never widens the layout beyond the screen.

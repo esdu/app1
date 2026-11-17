@@ -421,7 +421,8 @@ authoritative: nothing automatic ends it, only Resume.
   disabled with that hint; the volume buttons and a stale voice callback get a "Can't save" toast and
   the failure haptic. Dim is disabled while paused (`setDimmed(true)` is ignored): nothing is recorded,
   so the screen should be allowed to lock. Settings changes and thermal steps while paused start
-  nothing. Retry for clips waiting for Photos keeps working.
+  nothing. Retry for clips waiting for Photos keeps working. The preview is black while paused
+  (`PreviewSurface`), so a frozen last frame can't pass for a live picture.
 * **Not persisted across relaunch.** The pause lives in memory. A relaunch (including after iOS ends
   the app in the background) records as before: issue #15 keeps the launch and foreground defaults and
   rules out persisting a new default recording mode, and a persisted pause would turn a cold launch
@@ -438,8 +439,8 @@ answered "Don't Allow" or "Allow" afterwards; background during a pending start 
 kept); rapid pause/resume/background/foreground; pause during recovery backoff and during a stall
 restart's start (the watchdog re-arms after Resume); interruption ended while paused; Try Again
 queued just before Pause; a low-disk stop queued just before Pause; no persistence across a relaunch.
-UI test `testPauseHoldsAcrossBackgroundUntilResume`: Pause, confirm, banner and disabled Save, Home and
-back, still paused, Resume, REC, Save. Not covered by CI: the real camera permission prompt and real
+UI test `testPauseHoldsAcrossBackgroundUntilResume`: Pause, confirm, banner and disabled Save, to the
+Settings app and back, still paused, Resume, REC, Save. Not covered by CI: the real camera permission prompt and real
 interruption timing around a pause, and the volume buttons while paused (README checklist).
 
 ### Frame watchdog (issue #9)

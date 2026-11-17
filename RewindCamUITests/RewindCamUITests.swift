@@ -268,11 +268,10 @@ final class RewindCamUITests: XCTestCase {
         XCTAssertEqual(resume.label, "Resume recording")
         screenshot(app, "pause-3-paused")
 
-        // Leave the app and come back: still paused, nothing restarts on its own.
-        XCUIDevice.shared.press(.home)
-        let deadline = Date().addingTimeInterval(15)
-        while app.state == .runningForeground, Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
-        XCTAssertNotEqual(app.state, .runningForeground, "RewindCam did not go to the background")
+        // Leave for the Settings app and come back: still paused, nothing restarts on its own.
+        let settingsApp = XCUIApplication(bundleIdentifier: "com.apple.Preferences")
+        settingsApp.activate()
+        XCTAssertTrue(settingsApp.wait(for: .runningForeground, timeout: 15), "the Settings app did not open")
         Thread.sleep(forTimeInterval: 2)
         app.activate()
         XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "RewindCam did not come back")

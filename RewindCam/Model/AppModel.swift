@@ -474,6 +474,7 @@ final class AppModel {
         recorder.suspend()
         setDimmed(false)
         environment.screen.setIdleTimerDisabled(false)
+        previewImage = nil
         phase = .userPaused
         refreshStatus()
         schedulePipeline { model in await model.tearDown(reason: nil) }
