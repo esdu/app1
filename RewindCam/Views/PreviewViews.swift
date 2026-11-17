@@ -4,21 +4,49 @@ import SwiftUI
 import UIKit
 
 /// Live camera preview backed by `AVCaptureVideoPreviewLayer`.
+///
+/// Issue #37: the layer uses the same fixed portrait angle as the recorded buffers
+/// (`CaptureGeometry.portraitRotationAngle`). The interface is portrait-only, so the screen turns with the
+/// phone and a portrait-upright picture is a window onto the scene: upright relative to the scene however
+/// the phone is held, as in the system Camera app with its controls locked. The angle is set again whenever
+/// the layer's connection may have been rebuilt: after each reconfiguration of the session (camera, quality
+/// or sound change; `CameraFrameSource.didConfigureNotification`), on joining a window, and on layout.
 struct CameraPreview: UIViewRepresentable {
     let session: AVCaptureSession
 
     final class PreviewView: UIView {
         override class var layerClass: AnyClass { AVCaptureVideoPreviewLayer.self }
         var previewLayer: AVCaptureVideoPreviewLayer { layer as! AVCaptureVideoPreviewLayer }
+
+        func attach(_ session: AVCaptureSession) {
+            previewLayer.session = session
+            previewLayer.videoGravity = .resizeAspectFill
+            // Selector-based: removed automatically when the view goes away. Posted on the main queue.
+            NotificationCenter.default.addObserver(self, selector: #selector(sessionDidConfigure(_:)),
+                                                   name: CameraFrameSource.didConfigureNotification, object: session)
+            applyRotation()
+        }
+
+        @objc private func sessionDidConfigure(_ note: Notification) { applyRotation() }
+
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            applyRotation()
+        }
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            applyRotation()
+        }
+
+        private func applyRotation() {
+            CaptureGeometry.applyPortraitRotation(to: previewLayer.connection)
+        }
     }
 
     func makeUIView(context: Context) -> PreviewView {
         let view = PreviewView()
-        view.previewLayer.session = session
-        view.previewLayer.videoGravity = .resizeAspectFill
-        if let connection = view.previewLayer.connection, connection.isVideoRotationAngleSupported(90) {
-            connection.videoRotationAngle = 90
-        }
+        view.attach(session)
         return view
     }
 

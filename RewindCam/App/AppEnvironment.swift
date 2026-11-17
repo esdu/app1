@@ -34,6 +34,9 @@ struct AppEnvironment {
     var clock: WallClock = SystemWallClock()
     /// Interval timing for the frame watchdog (issue #9). Tests pass their `FakeDelayScheduler`.
     var monotonicClock: MonotonicClock = HostMonotonicClock()
+    /// Which way the phone is held, read at each save tap to turn the clip upright (issue #37). The live
+    /// sensor stays portrait where there is no accelerometer (the Simulator). Tests: `FakeOrientationSensor`.
+    var orientation: DeviceOrientationSensor = MotionOrientationSensor()
 
     static let uiTestArgument = "-UITestMode"
     /// With `-UITestMode`: the fake Photos library fails the first save, so the UI test can retry it.

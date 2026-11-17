@@ -10,6 +10,10 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
 
     private struct WeakSink { weak var sink: (any SampleSink)? }
 
+    /// Posted on the main queue, with the session as its object, after each successful (re)configuration:
+    /// the inputs were replaced, so `CameraPreview` sets its connection's angle again (issue #37).
+    static let didConfigureNotification = Notification.Name("RewindCam.CameraFrameSource.didConfigure")
+
     let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "RewindCam.Camera.session")
     private let sampleQueue = DispatchQueue(label: "RewindCam.Camera.samples", qos: .userInitiated)
@@ -71,6 +75,10 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
                 do {
                     let problem = try configure(configuration, audio: addMicrophone)
                     if !session.isRunning { session.startRunning() }
+                    // The preview layer's connection is rebuilt with the new input; it re-applies its angle.
+                    DispatchQueue.main.async { [self] in
+                        NotificationCenter.default.post(name: Self.didConfigureNotification, object: session)
+                    }
                     cont.resume(returning: problem)
                 } catch {
                     cont.resume(throwing: error)
@@ -210,11 +218,14 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
         guard session.canAddOutput(videoOutput) else { throw FrameSourceError.configurationFailed("can't add video output") }
         session.addOutput(videoOutput)
         if let connection = videoOutput.connection(with: .video) {
-            // The app is portrait-only: rotate in the capture pipeline so the file is upright.
-            if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
-            if configuration.camera == .front, connection.isVideoMirroringSupported {
+            // Fixed, whichever way the phone is held (issue #37): the buffer is always upright for the
+            // portrait interface, so turning the phone never changes the frame size, which would start a
+            // new writer generation and clear the buffer. A save turns its clip instead (`ClipOrientation`).
+            CaptureGeometry.applyPortraitRotation(to: connection)
+            // Front: mirrored like its preview. `ClipOrientation` depends on this (`CaptureGeometry`).
+            if connection.isVideoMirroringSupported {
                 connection.automaticallyAdjustsVideoMirroring = false
-                connection.isVideoMirrored = true
+                connection.isVideoMirrored = CaptureGeometry.isMirrored(configuration.camera)
             }
         }
 
