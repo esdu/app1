@@ -743,8 +743,8 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   failing tests and messages are appended to the job summary and `test-summary.md` ("Stress run").
   It caught one flake: `writerAudioInputWithoutSamples(realTime: true)` timed out waiting for segments
   ("no segment through …"). The test pushed 6 s of frames back to back into a *real-time* writer, which
-  drops every frame its input isn't ready for; how many survived depended on CPU load (from ~3 frames to
-  most of them), and with too few no segment was ever emitted. Real-time recorder tests now feed frames
+  drops every frame its input isn't ready for; how many survived depended on timing and load (usually
+  enough; in a reproduction on CI only 3 to 33 of the 90), and with too few no segment was ever emitted. Real-time recorder tests now feed frames
   with `RecorderHarness.generatePaced`: each frame only once the writer's video input is ready, as a
   camera feeds an encoder that keeps up. No frame is dropped (the test checks every one was appended),
   so the segments are the offline writer's whatever the load. Otherwise bursts (`source.generate`) go
