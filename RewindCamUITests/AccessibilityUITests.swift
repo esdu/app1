@@ -140,7 +140,7 @@ final class AccessibilityUITests: XCTestCase {
         app.buttons["dimButton"].tap()
         let overlay = element(app, "dimOverlay")
         XCTAssertTrue(overlay.waitForExistence(timeout: 5))
-        try AuditLog.run(on: app, "dimmed", types: .all, test: self)
+        try AuditLog.run(on: app, "dimmed", types: .all, dimmed: true, test: self)
         overlay.tap()
         XCTAssertTrue(overlay.waitForNonExistence(timeout: 5))
 
@@ -177,17 +177,23 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     private let verifiedFrames: [String: CGRect]
     private let screen: CGRect
     private let systemForm: Bool
+    /// Settings: the bottom of the navigation bar, plus its scroll-edge effect.
+    private let barFadeBottom: CGFloat?
+    private let dimmed: Bool
 
-    private init(cappedFrames: [String: CGRect], verifiedFrames: [String: CGRect], screen: CGRect, systemForm: Bool) {
+    private init(cappedFrames: [String: CGRect], verifiedFrames: [String: CGRect], screen: CGRect,
+                 systemForm: Bool, barFadeBottom: CGFloat?, dimmed: Bool) {
         self.cappedFrames = cappedFrames
         self.verifiedFrames = verifiedFrames
         self.screen = screen
         self.systemForm = systemForm
+        self.barFadeBottom = barFadeBottom
+        self.dimmed = dimmed
     }
 
     @MainActor
     static func run(on app: XCUIApplication, _ screenName: String, types: XCUIAccessibilityAuditType,
-                    systemForm: Bool = false, test: XCTestCase,
+                    systemForm: Bool = false, dimmed: Bool = false, test: XCTestCase,
                     file: StaticString = #filePath, line: UInt = #line) throws {
         func frames(_ ids: [String]) -> [String: CGRect] {
             var found: [String: CGRect] = [:]
@@ -197,8 +203,11 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
             }
             return found
         }
+        let bar = app.navigationBars.firstMatch
+        let barFadeBottom = systemForm && bar.exists ? bar.frame.maxY + scrollEdgeFade : nil
         let log = AuditLog(cappedFrames: frames(cappedTextElements), verifiedFrames: frames(verifiedAtLargestText),
-                           screen: app.windows.firstMatch.frame, systemForm: systemForm)
+                           screen: app.windows.firstMatch.frame, systemForm: systemForm,
+                           barFadeBottom: barFadeBottom, dimmed: dimmed)
         try app.performAccessibilityAudit(for: types) { issue in
             MainActor.assumeIsolated { log.handle(issue) }
         }
@@ -223,7 +232,7 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
         let frame = element?.frame
         let line = "[\(Self.name(issue.auditType))] id=\"\(identifier)\" label=\"\(label)\" "
             + "frame=\(frame.map { "\($0)" } ?? "?"): \(issue.compactDescription) — \(issue.detailedDescription)"
-        if let reason = excuse(issue.auditType, identifier: identifier, frame: frame,
+        if let reason = excuse(issue.auditType, identifier: identifier, label: label, frame: frame,
                                partial: issue.compactDescription.contains("partially")) {
             excused.append(line + " (excused: \(reason))")
         } else {
@@ -233,7 +242,7 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     }
 
     /// Documented exclusions (issue #11). Everything else fails the test.
-    private func excuse(_ type: XCUIAccessibilityAuditType, identifier: String, frame: CGRect?,
+    private func excuse(_ type: XCUIAccessibilityAuditType, identifier: String, label: String, frame: CGRect?,
                         partial: Bool) -> String? {
         if identifier == "fakeLibraryCount" { return "UI-test-only label, not shown in the app" }
         if type == .dynamicType, cappedFrames[identifier] != nil {
@@ -251,6 +260,21 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
         if type == .dynamicType, partial, let frame,
            let owner = verifiedFrames.first(where: { $0.value.insetBy(dx: -1, dy: -1).contains(frame) })?.key {
             return "text in \(owner) is shown at full size at the largest text size (a11y-* screenshots)"
+        }
+        // Settings is a standard Form: "partially unsupported" there is about system rows and the Done
+        // toolbar button, which the largest-text test shows at full size (a11y-2* screenshots).
+        if systemForm, type == .dynamicType, partial {
+            return "system Form row or toolbar button, shown at full size at the largest text size (a11y-2*)"
+        }
+        // Rows scrolled under the navigation bar are faded by its scroll-edge effect on purpose.
+        if systemForm, type == .contrast, let frame, let barFadeBottom, frame.minY < barFadeBottom {
+            return "scrolled under the navigation bar, faded by its scroll-edge effect"
+        }
+        // While dimmed, the controls are covered by the 92 % black overlay on purpose and hidden from
+        // VoiceOver; the audit still measures their text. The overlay's own text must pass.
+        if dimmed, type == .contrast, !Self.dimOverlayTexts.contains(where: { label.hasPrefix($0) }),
+           identifier != "dimOverlay" {
+            return "covered by the dim overlay on purpose (hidden from VoiceOver while dimmed)"
         }
         // Settings is a standard Form. Issues XCUITest can't attach to any element there come from the
         // UIKit internals of its system controls (segmented pickers, switches, the navigation bar);
@@ -277,8 +301,14 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     static let verifiedAtLargestText: [String] = [
         "userPausedBanner", "microphoneBanner", "lowDiskWarningBanner", "unsavedBanner", "stallBanner",
         "cameraDeniedBanner", "errorBanner", "lowDiskBanner", "pausedBanner", "thermalBanner",
-        "photosDeniedBanner", "dimOverlay", "settingsForm", "doneButton",
+        "photosDeniedBanner", "dimOverlay", "doneButton",
     ]
+
+    /// The dim overlay's own text (ContentView `DimOverlay`).
+    static let dimOverlayTexts = ["Recording ·", "Not recording", "Tap anywhere to wake", "Volume buttons still save"]
+
+    /// How far below the navigation bar its scroll-edge effect fades content (iOS 26).
+    static let scrollEdgeFade: CGFloat = 40
 
     static func name(_ type: XCUIAccessibilityAuditType) -> String {
         let known: [(XCUIAccessibilityAuditType, String)] = [

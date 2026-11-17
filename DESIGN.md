@@ -753,7 +753,10 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   capped elements; "partially unsupported" Dynamic Type for text the largest-text test shows wrapping
   at full size (banners, dim overlay, Settings rows, Done); issues in the Settings Form that XCUITest
   can't attach to any element (UIKit internals of system controls; the segmented pickers become menus
-  at accessibility sizes); and text cut by the screen edge in a scrolling list. Excused issues are
+  at accessibility sizes); Settings rows faded under the navigation bar's scroll-edge effect; on the
+  dimmed screen, the contrast of the controls the overlay covers on purpose (the audit measures them
+  although they are hidden from VoiceOver; the overlay's own text must pass); and text cut by the
+  screen edge in a scrolling list. Excused issues are
   attached to the test result as `audit-excused-*`. While dimmed, everything under the overlay is
   hidden from VoiceOver and the overlay is modal. Real VoiceOver speech and runtime text-size changes
   are on the README's device checklist.
