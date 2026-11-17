@@ -155,6 +155,11 @@ final class AppModel {
     private let fanOut: SampleFanOut
     /// Bumped on every voice start/stop so a stale authorization callback can't start a second session.
     @ObservationIgnored private var voiceSession = 0
+    /// What VoiceOver was last told (issue #11; `announceChanges()`): the phase, the thermal message and
+    /// the notices on screen. Only a difference is announced, so the 0.5 s status tick can't repeat one.
+    @ObservationIgnored private var announcedPhase: Phase = .idle
+    @ObservationIgnored private var announcedThermalMessage: String?
+    @ObservationIgnored private var announcedNoticeIDs: Set<String> = []
 
     init(environment: AppEnvironment) {
         self.environment = environment
@@ -200,6 +205,8 @@ final class AppModel {
                 Task { @MainActor in self.previewImage = image }
             }
         }
+        // A phone that is already hot at launch shows the banner; only later changes are announced.
+        announcedThermalMessage = thermalMessage
         refreshStatus()
     }
 
@@ -273,7 +280,8 @@ final class AppModel {
         let unsaved = unsavedClipsSpaceSentence
         if !unsaved.isEmpty { message += " " + unsaved }
         return AppNotice(id: "lowDiskWarningBanner", systemImage: "externaldrive.badge.exclamationmark",
-                         title: "Storage is low", message: message, severity: .warning, action: nil)
+                         title: "Storage is low", message: message, severity: .warning, action: nil,
+                         spoken: "Storage is low. A save may not fit, and recording stops if free space runs out.")
     }
 
     /// Settings sheet: would a `bufferSeconds` buffer at the current quality fit in the free space?
@@ -402,7 +410,9 @@ final class AppModel {
                          title: "The camera was restarted",
                          message: "\(what), so RewindCam restarted the camera at \(time). "
                              + "Footage from before then is gone; Save has what was recorded since.",
-                         severity: .warning, action: nil)
+                         severity: .warning, action: nil,
+                         spoken: "The camera was restarted because video had stopped. "
+                             + "Footage from before then is gone; Save has what was recorded since.")
     }
 
     /// Shown while the user has paused (issue #15): that nothing is recorded, that the unsaved buffer was
@@ -553,6 +563,8 @@ final class AppModel {
     func retryStart() {
         guard phase.isStartFailure, !isUserPaused else { return }
         phase = .starting
+        // If this attempt fails the same way, VoiceOver says so again (issue #11).
+        announceChanges()
         start()
     }
 
@@ -875,9 +887,12 @@ final class AppModel {
 
     // MARK: Toast
 
+    /// Shows a toast for 4 s and speaks it to VoiceOver (issue #11): every toast is an event the user
+    /// caused or must know about (a save's result, why Save refused), so each is announced exactly once.
     func showToast(_ message: String, isError: Bool = false, isWarning: Bool = false) {
         let toast = Toast(message: message, isError: isError, isWarning: isWarning)
         self.toast = toast
+        environment.announcer.announce(message, priority: isError ? .high : .normal)
         toastTask?.cancel()
         toastTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
@@ -1373,6 +1388,74 @@ final class AppModel {
         }
         if phase == .recording {
             batteryDrain.record(level: batteryLevel, isCharging: isCharging, at: environment.clock.now())
+        }
+        announceChanges()
+    }
+
+    // MARK: VoiceOver announcements (issue #11; DESIGN.md "Accessibility")
+
+    /// Tells VoiceOver what changed since the last call, in one announcement: the phase (recording,
+    /// paused, resumed, stopped, failed), a thermal step-down or recovery, and warnings that appeared
+    /// (frame-stall restart, low storage, microphone). Runs at the end of every `refreshStatus()`, which
+    /// every phase change reaches, and compares with what was last announced, so an unchanged state on
+    /// the 0.5 s status tick says nothing. `.starting` is not announced: it lasts a moment, and the
+    /// phase it ends in is. Toasts (save results) are announced by `showToast`.
+    private func announceChanges() {
+        var parts: [String] = []
+        var priority = AnnouncementPriority.normal
+        if phase == .starting {
+            // Try Again after a failure: if this start fails the same way, that is news again.
+            if announcedPhase.isStartFailure { announcedPhase = .starting }
+        } else if phase != announcedPhase {
+            let previous = announcedPhase
+            announcedPhase = phase
+            if let text = Self.phaseAnnouncement(phase, after: previous) {
+                parts.append(text)
+                if phase.isStartFailure { priority = .high }
+            }
+        }
+        if thermalMessage != announcedThermalMessage {
+            let hadMessage = announcedThermalMessage != nil
+            announcedThermalMessage = thermalMessage
+            if let thermalMessage {
+                parts.append(thermalMessage)
+            } else if hadMessage {
+                parts.append("The phone has cooled down. Quality is back to \(activePreset).")
+            }
+        }
+        // Each warning once while it is shown; it is news again only after it went away.
+        let notices = [stallNotice, diskSpaceNotice, microphoneNotice].compactMap { $0 }
+        announcedNoticeIDs.formIntersection(notices.map(\.id))
+        for notice in notices where !announcedNoticeIDs.contains(notice.id) {
+            announcedNoticeIDs.insert(notice.id)
+            parts.append(notice.announcement)
+        }
+        guard !parts.isEmpty else { return }
+        environment.announcer.announce(parts.joined(separator: " "), priority: priority)
+    }
+
+    /// What VoiceOver says when the phase becomes `phase` (nil: nothing worth saying).
+    static func phaseAnnouncement(_ phase: Phase, after previous: Phase) -> String? {
+        switch phase {
+        case .starting:
+            return nil
+        case .idle:
+            return previous == .recording ? "Recording stopped." : nil
+        case .recording:
+            switch previous {
+            case .paused, .userPaused: return "Recording resumed."
+            default: return "Recording."
+            }
+        case .paused(let why):
+            return why // "Paused — another app is using the camera.", "Camera error: … Restarting…"
+        case .userPaused:
+            return "Paused. The camera is off until you tap Resume."
+        case .cameraDenied:
+            return "Not recording: camera access is off."
+        case .failed(let why):
+            return "Not recording. \(why)"
+        case .outOfSpace:
+            return "Not recording: not enough free space."
         }
     }
 

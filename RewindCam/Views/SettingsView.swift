@@ -11,7 +11,7 @@ struct SettingsView: View {
                     Picker("Buffer length", selection: bufferSeconds) {
                         ForEach(RecordingSettings.bufferChoices, id: \.self) { Text("\($0) s").tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                     .accessibilityIdentifier("bufferPicker")
                     // Free space and whether this buffer fits (issue #10).
                     LabeledContent("Free space", value: model.availableDiskBytes.map { BufferMath.formatted(bytes: $0) } ?? "Unknown")
@@ -42,7 +42,7 @@ struct SettingsView: View {
                             Text(s == 0 ? "Off" : "+\(s) s").tag(s)
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                     .accessibilityIdentifier("postRollPicker")
                 } header: {
                     Text("Keep recording after Save")
@@ -54,34 +54,31 @@ struct SettingsView: View {
                     Picker("Resolution", selection: resolution) {
                         ForEach(model.supportedResolutions) { Text($0.label).tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                     .accessibilityIdentifier("resolutionPicker")
                     Picker("Frame rate", selection: frameRate) {
                         ForEach(FrameRate.allCases) { Text($0.label).tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                     .accessibilityIdentifier("frameRatePicker")
                     Picker("Camera", selection: camera) {
                         ForEach(CameraPosition.allCases) { Text($0.label).tag($0) }
                     }
-                    .pickerStyle(.segmented)
+                    .adaptivePickerStyle()
                     .accessibilityIdentifier("cameraPicker")
                     Toggle("Record sound", isOn: audioEnabled)
                         .accessibilityIdentifier("audioToggle")
                     if let notice = model.microphoneNotice {
                         // Same notice as the main screen's banner; the toggle keeps the user's choice.
-                        Label(notice.message, systemImage: notice.systemImage)
-                            .font(.footnote)
-                            .foregroundStyle(.orange)
+                        NoteLabel(text: notice.message, systemImage: notice.systemImage, color: .orange)
                             .accessibilityIdentifier("microphoneSettingsNote")
                         if notice.action == .openSettings {
                             Button(AppNotice.Action.openSettings.title) { model.openAppSettings() }
                         }
                     }
                     if model.activePreset != model.settings.preset {
-                        Label("Recording at \(model.activePreset.description) while the phone is hot.",
-                              systemImage: "thermometer.high")
-                            .foregroundStyle(.orange)
+                        NoteLabel(text: "Recording at \(model.activePreset.description) while the phone is hot.",
+                                  systemImage: "thermometer.high", color: .orange)
                     }
                 }
 
@@ -184,9 +181,7 @@ private struct DiskFitNote: View {
 
     var body: some View {
         if let note {
-            Label(note.text, systemImage: note.systemImage)
-                .font(.footnote)
-                .foregroundStyle(note.color)
+            NoteLabel(text: note.text, systemImage: note.systemImage, color: note.color)
                 .accessibilityIdentifier("diskFitNote")
         }
     }
@@ -211,6 +206,46 @@ private struct DiskFitNote: View {
             return (text, "externaldrive.badge.exclamationmark", .orange)
         case .enough:
             return nil
+        }
+    }
+}
+
+/// A warning in a Settings row: the icon carries the colour, the text stays in the primary colour, so it
+/// keeps full contrast (orange or red text on the grouped background is below 4.5:1). Issue #11.
+private struct NoteLabel: View {
+    let text: String
+    let systemImage: String
+    let color: Color
+
+    var body: some View {
+        Label {
+            Text(text)
+                .foregroundStyle(.primary)
+        } icon: {
+            Image(systemName: systemImage)
+                .foregroundStyle(color)
+        }
+        .font(.footnote)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private extension View {
+    /// Segmented controls normally; at accessibility text sizes their segments would truncate ("1…"),
+    /// so the choice becomes a menu that shows the full value (issue #11).
+    func adaptivePickerStyle() -> some View {
+        modifier(AdaptivePickerStyle())
+    }
+}
+
+private struct AdaptivePickerStyle: ViewModifier {
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    func body(content: Content) -> some View {
+        if typeSize.isAccessibilitySize {
+            content.pickerStyle(.menu)
+        } else {
+            content.pickerStyle(.segmented)
         }
     }
 }

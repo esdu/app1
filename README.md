@@ -69,6 +69,15 @@ source, because the Simulator has no camera.*
   Photos are never deleted to make room; the warnings say how much they take.
 - **Orphan cleanup**: leftover buffer files and half-written exports from a crash or kill are removed
   on launch. Finished clips that didn't reach Photos are kept.
+- **Accessibility**: VoiceOver speaks every save result and state change (recording, paused, resumed,
+  stopped, camera restarted, storage low, phone hot), once per change, also with the screen dimmed;
+  while dimmed, the overlay has a **Save** action. The badge, pills, banners and controls read as
+  sentences ("Recording, 12 seconds ready"), and Save says why it is unavailable. Text follows Dynamic
+  Type up to the largest accessibility sizes: the status bar wraps to two rows, banners scroll instead
+  of covering the Save row, and Settings swaps segmented controls for menus. Fixed shapes (status
+  pills, round buttons, the Save circle) stop growing at an accessibility size and show the large
+  content viewer on a long press. Banner and button text keeps at least 4.5:1 contrast over any
+  footage, and the toast doesn't animate with Reduce Motion. See DESIGN.md §4, "Accessibility".
 - **Voice trigger** (optional, off by default): say "save that". Recognition is **on-device
   only** (`requiresOnDeviceRecognition`). The app also measures battery drain per hour so you can
   see what the voice trigger costs.
@@ -127,6 +136,10 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
   simulated slow and full storage only; real peak memory and storage at 4K60 are not measured on a
   device yet.
 - The voice trigger is English (en-US) and needs a device that supports on-device recognition.
+- **Accessibility is checked in the Simulator only**: unit tests check what is announced, UI tests run
+  the Xcode accessibility audit and the largest text size (screenshots `a11y-*`). Real VoiceOver
+  speech, the large content viewer and changing the text size while the app runs are not verified on a
+  device yet (see the checklist).
 - **A pause lasts until Resume or until RewindCam is relaunched**: it isn't saved, so a relaunch (also
   after iOS ends the app in the background) records again, as before. While paused the camera session
   is off, so the volume buttons may change the volume instead of reaching RewindCam (not verified on a
@@ -244,6 +257,21 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       repeat on a nearly full phone (under 1 GB free): the save either succeeds, comes out shorter with
       "It's shorter than asked", or says how much to free; recording never fails with a write error and
       clips waiting for Photos are still there.
+- [ ] **VoiceOver through a save**: turn on VoiceOver. Swipe through the main screen: the badge reads
+      "Recording, N seconds ready", the pills read "Buffer length 30 seconds" and "1080p, 30 frames per
+      second", each banner reads as one element with its button (Open Settings, Try Again, Retry) as a
+      separate one. Double-tap Save: VoiceOver says "Saved … clip to Photos". Tap Dim, then use the
+      overlay's **Save** action (swipe up or down, double-tap): the result is spoken without waking the
+      screen; double-tap wakes it. Tap Pause, confirm: "Paused. The camera is off until you tap Resume";
+      Save reads "dimmed" and why. Resume: "Recording resumed." Open Camera.app from Control Center and
+      come back: the pause and the resume are each spoken once, not repeated.
+- [ ] **Largest text size**: Settings › Accessibility › Display & Text Size › Larger Text, on, slider all
+      the way up, with RewindCam open. On the smallest supported iPhone (SE or mini) and on a large one:
+      the status bar wraps to two rows, nothing is cut off or overlaps, banners scroll, Save, Pause, Dim and
+      Settings are fully visible and work; a long press on a pill or round button shows the large content
+      viewer. In Settings, the buffer, post-roll and quality choices are menus and show their full values.
+- [ ] **Reduce Motion**: Settings › Accessibility › Motion › Reduce Motion on: the toast appears and
+      disappears without a fade; nothing else on screen moves.
 - [ ] **Lock during save**: with +10 s post-roll, tap Save and lock the phone at once. After 30 s,
       unlock: the clip is in Photos (or, if not, offered for Retry), never silently gone.
 - [ ] **Locked export (file protection)**: at 4K60 with a 120 s buffer and +30 s post-roll, record
@@ -261,6 +289,9 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
   `-UITestDenyCamera` makes every start fail as if camera access were denied, until **Open Settings** is
   tapped (which stands in for allowing it there); `-UITestNoCamera` makes every start fail with "no camera".
   `-UITestLowDisk` makes free space read 90 MB: too little for the default buffer, enough for 15 s at 720p.
+  `-UITestLowDiskWarning` makes it read 150 MB: enough to record, with the orange "Storage is low" warning.
+  The accessibility UI tests add `-UIPreferredContentSizeCategoryName UICTContentSizeCategoryAccessibilityXXXL`
+  (largest text).
 - CI ([`.github/workflows/ios.yml`](.github/workflows/ios.yml)): newest macOS runner and newest
   Xcode, iPhone simulator picked dynamically, `xcodebuild test`, then the unit tests four more times as a
   flake check. Per-test timeouts are on (180 s default, 300 s maximum), so a hung test fails by name

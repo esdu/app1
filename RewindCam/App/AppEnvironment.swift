@@ -12,6 +12,8 @@ struct AppEnvironment {
     var battery: BatteryMonitor
     var screen: ScreenController
     var haptics: Haptics
+    /// VoiceOver announcements for save results and state changes (issue #11). Tests: `FakeAccessibilityAnnouncer`.
+    var announcer: AccessibilityAnnouncer
     /// Real-time encoding (drop frames when the encoder is busy). Tests use `false`.
     var realTime: Bool
     /// Only in `-UITestMode`: lets the UI show how many clips the fake library holds.
@@ -50,6 +52,11 @@ struct AppEnvironment {
     /// 30 s buffer at 1080p 30 fps but enough for 15 s at 720p 30 fps (issue #10).
     static let uiTestLowDiskArgument = "-UITestLowDisk"
     static let uiTestLowDiskBytes: Int64 = 90_000_000
+    /// With `-UITestMode`: free space reads as `uiTestLowDiskWarningBytes` (150 MB): enough to record the
+    /// default 30 s buffer at 1080p 30 fps, too little to be sure a save fits, so the orange "Storage is
+    /// low" banner shows while recording (issue #10). The large-text UI test uses it for a third banner.
+    static let uiTestLowDiskWarningArgument = "-UITestLowDiskWarning"
+    static let uiTestLowDiskWarningBytes: Int64 = 150_000_000
 
     static func current(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         arguments.contains(uiTestArgument) ? uiTest(arguments: arguments) : live()
@@ -67,6 +74,7 @@ struct AppEnvironment {
             battery: SystemBatteryMonitor(),
             screen: SystemScreenController(),
             haptics: SystemHaptics(),
+            announcer: SystemAccessibilityAnnouncer(),
             realTime: true,
             fakeLibrary: nil,
             supportsCaptureButtons: true,
@@ -106,6 +114,8 @@ struct AppEnvironment {
         let diskCapacity: DiskCapacityProvider
         if arguments.contains(uiTestLowDiskArgument) {
             diskCapacity = FakeDiskCapacity(availableBytes: uiTestLowDiskBytes)
+        } else if arguments.contains(uiTestLowDiskWarningArgument) {
+            diskCapacity = FakeDiskCapacity(availableBytes: uiTestLowDiskWarningBytes)
         } else {
             diskCapacity = storage.capacity
         }
@@ -122,6 +132,7 @@ struct AppEnvironment {
             battery: SystemBatteryMonitor(),
             screen: SystemScreenController(),
             haptics: SystemHaptics(),
+            announcer: SystemAccessibilityAnnouncer(),
             realTime: true,
             fakeLibrary: fake,
             supportsCaptureButtons: false,

@@ -719,6 +719,49 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   session stops and the buffer is cleared. The UI says so up front ("Keep RewindCam open — iOS
   can't record in the background"). On return to the foreground, capture restarts on its own.
 
+### Accessibility (issue #11)
+
+* **Announcements.** `AppModel` speaks to VoiceOver through `environment.announcer`
+  (`AccessibilityAnnouncer`; live `UIAccessibility.post(.announcement)` with a speech priority, tests
+  `FakeAccessibilityAnnouncer`). Every toast is announced once by `showToast` (save results, "Can't
+  save…", Photos failures; errors at high priority). State changes go through `announceChanges()` at
+  the end of `refreshStatus()`, which every phase change reaches: it compares the phase, the thermal
+  message and the visible warnings (stall restart, low storage, microphone) with what was last
+  announced and speaks only the difference, in one utterance ("Recording resumed. The camera was
+  restarted…"). So the 0.5 s status tick never repeats an announcement. `.starting` isn't announced;
+  a failed start is announced at high priority, and again if Try Again fails the same way. A warning
+  is news again only after it went away. `AnnouncementTests` checks each event is spoken exactly once.
+* **VoiceOver labels.** The badge reads "Recording" with the value "N seconds ready" (or "Paused by
+  you", "Not recording, camera access is off", …); pills read as sentences; each banner's text is one
+  element with a decorative icon, and its button a separate one; Save's value says why it is
+  unavailable; the dim overlay is one button (wake) with a **Save** custom action.
+* **Dynamic Type.** All text uses text styles. Fixed shapes cap their text at an accessibility size and
+  show the large content viewer: the status bar (`...accessibility1`, wraps to two rows with
+  `ViewThatFits`), the round icon buttons, and the Save circle (grows with `@ScaledMetric` up to 168 pt,
+  which still fits beside the round buttons on a 375 pt-wide iPhone). Banners scroll when they don't fit
+  (`BannerArea`), their buttons move under the text at accessibility sizes, and Settings uses menus
+  instead of segmented controls there.
+* **Contrast and motion.** Text over footage sits on a near-black base (pills 65 %, banners 80 % under
+  the tint, toast 80 %), which keeps white text at ≥ 4.5:1 over a white frame; button fills are darkened
+  red, orange and blue (≥ 5:1 with white). Settings warnings colour the icon, not the text. The toast's
+  cross-fade is off with Reduce Motion; nothing else animates.
+* **Checks.** `AccessibilityUITests` launches at the largest text size with three banners and checks the
+  controls stay on screen, hittable and apart (screenshots `a11y-*`), and runs Xcode's
+  `performAccessibilityAudit()` on the main screen (recording, dimmed, paused) and Settings. Contrast
+  is audited on the paused screen (black preview), not over the synthetic colour bars. The other
+  exclusions, each with its reason in `AuditLog.excuse`: Dynamic Type results for the deliberately
+  capped elements; "partially unsupported" Dynamic Type for text the largest-text test shows wrapping
+  at full size (banners, dim overlay, Settings rows, Done); issues in the Settings Form that XCUITest
+  can't attach to any element (UIKit internals of system controls; the segmented pickers become menus
+  at accessibility sizes); Settings rows faded under the navigation bar's scroll-edge effect; on the
+  dimmed screen, the contrast of the controls the overlay covers on purpose (the audit measures them
+  although they are hidden from VoiceOver; the overlay's own text must pass); and text cut by the
+  screen edge in a scrolling list, or by the scrolling banner area's faded edge; and "potentially inaccessible text" with no element (the timestamp
+  drawn into the synthetic test footage, hidden from VoiceOver like the camera preview). Excused issues are
+  attached to the test result as `audit-excused-*`. While dimmed, everything under the overlay is
+  hidden from VoiceOver and the overlay is modal. Real VoiceOver speech and runtime text-size changes
+  are on the README's device checklist.
+
 ## 5. Testing strategy
 
 * **Unit tests** run the real `RollingRecorder` and `ClipExporter`, fed by a `SyntheticFrameSource` in
@@ -733,6 +776,7 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   `-UITestDenyCamera` makes its start throw `.cameraAccessDenied` until Open Settings is tapped (standing
   in for the user allowing it), and `-UITestNoCamera` makes it throw `.noCamera` (Try Again path).
   `-UITestLowDisk` makes free space read 90 MB (the low-disk guard, issue #10).
+  `-UITestLowDiskWarning` makes it read 150 MB (recording with the low-storage warning).
 * **Working-set stress** (issue #14, `WorkingSetTests`): `RecorderHarness` with injected storage
   (`MediaFileOperations`: writes that stall or fail, hard links that fail) and fragment callbacks driven
   straight into the writer delegate. A stalled write plus a burst checks the queued-fragment bound and
