@@ -54,6 +54,10 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     private var audioFailure: AudioUnavailableReason?
     private var startError: FrameSourceError?
     private var starts = 0
+    /// What each `start(_:)` was asked for, in order, including failed starts (issue #35; tests).
+    private var requested: [CaptureConfiguration] = []
+    /// What the source runs with: the last successful start's configuration; nil once stopped.
+    private var runningConfig: CaptureConfiguration?
     /// What `runState` reports; follows start/stop and the simulated events (issue #4).
     private let stateBox = Locked(CaptureRunState.stopped) // a lock, so the main actor never waits on `queue`
     private var resumeFailuresLeft = 0
@@ -103,11 +107,13 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
         await passStartGate()
         return try queue.sync { () throws -> ActiveCapture in
             starts += 1
+            requested.append(configuration)
             if let startError {
                 // Like a camera that can't start: nothing runs afterwards.
                 timer?.cancel()
                 timer = nil
                 timelineStarted = false
+                runningConfig = nil
                 stateBox.withLock { $0 = .stopped }
                 throw startError
             }
@@ -129,6 +135,7 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
             }
             emitsAudio = capture.audioCaptured
             timelineStarted = false
+            runningConfig = configuration
             stateBox.withLock { $0 = .running }
             startTimerIfRealTime()
             return capture
@@ -184,6 +191,13 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
 
     /// How many times `start(_:)` was called, including failed starts (tests).
     var startCount: Int { queue.sync { starts } }
+
+    /// The configuration of every `start(_:)` call so far, in order, including failed ones (tests).
+    var startConfigurations: [CaptureConfiguration] { queue.sync { requested } }
+
+    /// The configuration the source runs with: that of the last successful `start(_:)`, nil after
+    /// `stop()` or a failed start (tests; issue #35).
+    var runningConfiguration: CaptureConfiguration? { queue.sync { runningConfig } }
 
     /// Makes the next `start(_:)` wait, before it does anything, until `releaseHeldStart()`: a camera
     /// permission prompt the user hasn't answered, or a slow session start (issue #15). What it does
@@ -251,6 +265,7 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
             timer?.cancel()
             timer = nil
             timelineStarted = false
+            runningConfig = nil
             stateBox.withLock { $0 = .stopped }
         }
     }

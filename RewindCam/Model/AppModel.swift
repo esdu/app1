@@ -150,7 +150,11 @@ final class AppModel {
     @ObservationIgnored private var didRequestPhotosAccess = false
     /// Kept clips a save is still handing to Photos; hidden from `unsavedClips` so Retry can't race it.
     @ObservationIgnored private var clipsInFlight: Set<String> = [] // file names
+    /// The configuration the running source was last started with (nil while none is applied).
     @ObservationIgnored private var appliedCapture: CaptureConfiguration?
+    /// True while `startSource` runs (issue #35): it compares the configuration after every start and
+    /// starts again with the newest one, so a change made meanwhile needs no restart of its own.
+    @ObservationIgnored private var sourceStartInFlight = false
     /// Source → recorder, plus an optional tap for the voice trigger.
     private let fanOut: SampleFanOut
     /// Bumped on every voice start/stop so a stale authorization callback can't start a second session.
@@ -612,7 +616,10 @@ final class AppModel {
             return
         }
         let capture = captureConfiguration
-        if automaticCaptureAllowed, let applied = appliedCapture, applied != capture {
+        // While a start is in flight (`bringUp`, a stall restart), nothing is applied yet or the applied
+        // value is about to be replaced: `startSource` compares when the start returns and starts again
+        // with the newest configuration (issue #35), so no restart is queued for it here.
+        if automaticCaptureAllowed, !sourceStartInFlight, let applied = appliedCapture, applied != capture {
             let generation = captureGeneration
             schedulePipeline { model in
                 await model.tearDown(reason: nil)
@@ -930,7 +937,9 @@ final class AppModel {
     /// Starts capture for `generation` (`start()`, or a reconfigure in `applyQuality`). After each
     /// `await` it checks the generation is still current: a pause, background or newer start while the
     /// camera starts (or a permission prompt is up) makes this start stale, and a stale start publishes
-    /// no phase -- not `.recording`, not `.cameraDenied` -- and stops whatever it started.
+    /// no phase -- not `.recording`, not `.cameraDenied` -- and stops whatever it started. A setting or
+    /// thermal change made while the camera starts is not lost (issue #35): `startSource` starts again
+    /// with the newest configuration before anything is published.
     private func bringUp(_ generation: Int) async {
         if !didCleanUp {
             // Removes the old buffer, job folders and partial exports; finished clips are kept.
@@ -944,43 +953,88 @@ final class AppModel {
         endRecovery()
         frameWatchdog.disarm()
         sourceInterruption = nil
-        let capture = captureConfiguration
         // The recorder ignores samples until it is configured for what the source really delivers.
         recorder.suspend()
-        // Issue #10: room for the ring (the old one was just deleted) and the reserve, or don't start.
-        let space = diskPolicy.beforeBuffering(availableBytes: readDiskSpace())
-        guard space.level != .tooLow else {
-            await stopCapture()
-            guard isCurrent(generation) else { return }
-            phase = .outOfSpace(space)
-            refreshStatus()
-            return
-        }
-        diskSpace = space
         do {
-            let active = try await environment.source.start(capture)
-            guard isCurrent(generation) else {
+            // Issue #10: room for the ring (the old one was just deleted) and the reserve, or don't start.
+            switch try await startSource(checkedPolicy: nil, stillWanted: { self.isCurrent(generation) }) {
+            case .superseded:
                 // Superseded while the camera started: the newer intent owns the phase. Its own work
                 // (a pause's or background's tear-down, a newer start) is queued behind this one.
                 await stopCapture()
-                refreshStatus()
-                return
+            case .outOfSpace(let space):
+                await stopCapture()
+                guard isCurrent(generation) else { return }
+                phase = .outOfSpace(space)
+            case .started(let active, let capture):
+                activeCapture = active
+                appliedCapture = capture
+                // `capture` is the current configuration, so this matches what the camera delivers.
+                recorder.reconfigure(recorderConfiguration)
+                environment.screen.setIdleTimerDisabled(true)
+                // Recording, unless the source reported an interruption while it started.
+                applySourceState()
+                startStatusLoop()
+                startVoiceIfNeeded()
+                batteryDrain.reset(configuration: measuredConfiguration)
+                requestPhotosAccessOnce()
             }
-            activeCapture = active
-            appliedCapture = capture
-            recorder.reconfigure(recorderConfiguration)
-            environment.screen.setIdleTimerDisabled(true)
-            // Recording, unless the source reported an interruption while it started.
-            applySourceState()
-            startStatusLoop()
-            startVoiceIfNeeded()
-            batteryDrain.reset(configuration: measuredConfiguration)
-            requestPhotosAccessOnce()
         } catch {
             // A denial answered after a pause is not news: nothing is meant to run.
             if isCurrent(generation) { await startFailed(error) } else { await stopCapture() }
         }
         refreshStatus()
+    }
+
+    /// How `startSource` ended.
+    private enum SourceStart {
+        /// The source runs with `capture`, which is still the current `captureConfiguration`.
+        case started(ActiveCapture, CaptureConfiguration)
+        /// `stillWanted` turned false after an `await`: a newer intent owns the phase. The caller
+        /// publishes nothing; the source may still run, for the tear-down or start queued behind it.
+        case superseded
+        /// Not enough free space for the buffer at the current settings (issue #10). The source may run
+        /// (an earlier configuration); the caller stops it.
+        case outOfSpace(DiskSpaceCheck)
+    }
+
+    /// **Every source start goes through here** (`bringUp`, the stall restart). Starts the source with
+    /// the current `captureConfiguration`, then compares it again once the start returns: a setting or
+    /// thermal change made while the start was awaited (camera, resolution, frame rate, Record sound,
+    /// the voice trigger's microphone, a thermal step-down; issue #35) starts it again, with the newest
+    /// configuration, until a start returns with it still current. Each extra start is caused by a change
+    /// made during the previous one, so it settles on the newest configuration without looping. While
+    /// it runs, `applyQuality` queues no restart (`sourceStartInFlight`).
+    ///
+    /// Free space (issue #10) is checked with the current `diskPolicy` before a start, unless it equals
+    /// `checkedPolicy` (already checked by the caller), and again whenever the policy changed meanwhile.
+    /// `stillWanted` is checked after every `await`. `stoppingFirst` stops the source before the first
+    /// start (a stalled source still "runs"). Throws what `FrameSource.start` throws.
+    private func startSource(stoppingFirst: Bool = false, checkedPolicy: DiskSpacePolicy?,
+                             stillWanted: () -> Bool) async throws -> SourceStart {
+        sourceStartInFlight = true
+        defer { sourceStartInFlight = false }
+        if stoppingFirst {
+            await environment.source.stop()
+            guard stillWanted() else { return .superseded }
+        }
+        var checked = checkedPolicy
+        var started: (active: ActiveCapture, capture: CaptureConfiguration)?
+        while true {
+            let policy = diskPolicy
+            if policy != checked {
+                let space = policy.beforeBuffering(availableBytes: readDiskSpace())
+                guard space.level != .tooLow else { return .outOfSpace(space) }
+                diskSpace = space
+                checked = policy
+            }
+            let capture = captureConfiguration
+            if let started, started.capture == capture { return .started(started.active, capture) }
+            // A start on a running source reconfigures and restarts it (`FrameSource.start`).
+            let active = try await environment.source.start(capture)
+            guard stillWanted() else { return .superseded }
+            started = (active, capture)
+        }
     }
 
     /// Capture didn't start (issue #8). Nothing runs and Save is disabled; `startFailureNotice` says
@@ -1022,9 +1076,11 @@ final class AppModel {
         diskSpace = nil
         sourceInterruption = nil
         stopVoice()
+        // Cleared before the `await`: a change made while the source stops is picked up by the start
+        // queued behind this (issue #35) instead of queueing a second restart.
+        appliedCapture = nil
         await environment.source.stop()
         recorder.suspend()
-        appliedCapture = nil
         activeCapture = nil
         environment.screen.setIdleTimerDisabled(false)
         if isUserPaused {
@@ -1155,30 +1211,41 @@ final class AppModel {
 
     /// One restart attempt for `reason`; true if the source runs afterwards. The per-reason seam: a
     /// frame stall (#9) needs more than `resumeRunning()` (a source that "runs" without delivering).
-    private func restartSource(for reason: CaptureRecoveryReason) async -> Bool {
-        switch reason {
+    private func restartSource(for recovery: CaptureRecovery) async -> Bool {
+        switch recovery.reason {
         case .runtimeError, .sourceStopped:
+            // Never reconfigures, and `appliedCapture` stays set meanwhile: a change made during this
+            // `await` queues its own tear-down and start in `applyQuality`, behind this attempt.
             return await environment.source.resumeRunning()
         case .stalled:
-            return await restartStalledSource()
+            return await restartStalledSource(recovery.id)
         }
     }
 
     /// A stalled source still reports `.running`, so `resumeRunning()` would change nothing: stop it and
     /// start it again with the current configuration -- `tearDown` + `bringUp`, but keeping the recovery
     /// and the phase, which `attemptRecovery` owns. The recorder stays suspended until recording
-    /// resumes (`applySourceState`), so nothing from the old session reaches the new buffer.
-    private func restartStalledSource() async -> Bool {
+    /// resumes (`applySourceState`), so nothing from the old session reaches the new buffer. A change
+    /// made during the restart is started too (`startSource`, issue #35); if the new settings don't fit
+    /// in the free space, capture stops with the out-of-space notice (#10) instead of retrying.
+    private func restartStalledSource(_ id: Int) async -> Bool {
         stopVoice()
         recorder.suspend()
-        await environment.source.stop()
-        let capture = captureConfiguration
         do {
-            let active = try await environment.source.start(capture)
-            activeCapture = active
-            appliedCapture = capture
-            recorder.reconfigure(recorderConfiguration)
-            return environment.source.runState == .running
+            // The running capture's policy was checked when it started; only a change is checked again.
+            switch try await startSource(stoppingFirst: true, checkedPolicy: diskPolicy,
+                                         stillWanted: { self.isCurrentRecovery(id) }) {
+            case .started(let active, let capture):
+                activeCapture = active
+                appliedCapture = capture
+                recorder.reconfigure(recorderConfiguration)
+                return environment.source.runState == .running
+            case .superseded:
+                return false // `attemptRecovery` sees the recovery is no longer current
+            case .outOfSpace(let check):
+                await stopForLowDisk(check) // ends the recovery
+                return false
+            }
         } catch {
             // Not running; the backoff tries again, then gives up with Try Again.
             appliedCapture = nil
@@ -1189,7 +1256,7 @@ final class AppModel {
 
     private func attemptRecovery(_ id: Int) async {
         guard isCurrentRecovery(id), let current = recovery else { return }
-        let running = await restartSource(for: current.reason)
+        let running = await restartSource(for: current)
         // A pause, stop, new start or ordinary interruption may have superseded this recovery meanwhile.
         // Then what the restart started is left to the tear-down or start queued behind this attempt.
         guard isCurrentRecovery(id) else { return }
