@@ -63,7 +63,8 @@ jobs:
             -destination "id=${{ steps.sim.outputs.udid }}" \
             -resultBundlePath "$RESULT_BUNDLE" \
             -only-testing:RewindCamTests \
-            -skip-testing:RewindCamTests/TempFlakeRepro \
+            -skip-testing:RewindCamTests/TempBurstRepro \
+            -skip-testing:RewindCamTests/TempPacedRepro \
             -parallel-testing-enabled NO \
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 180 \
@@ -80,7 +81,7 @@ jobs:
             -project RewindCam.xcodeproj \
             -scheme RewindCam \
             -destination "id=${{ steps.sim.outputs.udid }}" \
-            -only-testing:RewindCamTests/TempFlakeRepro \
+            -only-testing:RewindCamTests/TempBurstRepro \
             -resultBundlePath LoadRepro.xcresult \
             -parallel-testing-enabled NO \
             CODE_SIGNING_ALLOWED=NO > load.log 2>&1 || rc=$?
@@ -99,9 +100,10 @@ jobs:
             -project RewindCam.xcodeproj \
             -scheme RewindCam \
             -destination "id=${{ steps.sim.outputs.udid }}" \
-            -only-testing:RewindCamTests \
-            -skip-testing:RewindCamTests/TempFlakeRepro \
-            -test-iterations 12 -run-tests-until-failure \
+            -only-testing:RewindCamTests/TempPacedRepro \
+            -only-testing:RewindCamTests/RecorderTests \
+            -only-testing:RewindCamTests/WorkingSetRecorderTests \
+            -test-iterations 25 -run-tests-until-failure \
             -resultBundlePath StressResults.xcresult \
             -parallel-testing-enabled NO \
             -test-timeouts-enabled YES \
