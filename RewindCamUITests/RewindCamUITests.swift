@@ -195,6 +195,43 @@ final class RewindCamUITests: XCTestCase {
         screenshot(app, "stall-2-saved-after-restart")
     }
 
+    /// `-UITestLowDisk` (issue #10): free space reads 90 MB, too little for the default 30 s buffer at
+    /// 1080p 30 fps (126 MB with the reserve). Nothing records, a red banner says how much to free and
+    /// where, and Save is disabled. Settings shows the free space and marks the buffer as not fitting;
+    /// 15 s at 1080p still doesn't fit (98 MB), 15 s at 720p does (81 MB), and recording starts on its own.
+    @MainActor
+    func testLowDiskExplainsAndRecordsAtSettingsThatFit() {
+        let app = launch(extraArguments: ["-UITestLowDisk"])
+        let banner = element(app, "lowDiskBanner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "no low-disk banner")
+        let why = banner.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "Not enough free space to keep a 30 s buffer")).firstMatch
+        XCTAssertTrue(why.exists, "the banner doesn't say what doesn't fit")
+        XCTAssertTrue(banner.buttons["tryAgainButton"].exists, "no Try Again button")
+        XCTAssertFalse(app.buttons["saveButton"].isEnabled, "Save must be disabled while nothing is recorded")
+        screenshot(app, "low-disk-1-not-recording")
+
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
+        XCTAssertTrue(element(app, "freeSpaceRow").waitForExistence(timeout: 5), "no free-space row")
+        XCTAssertTrue(element(app, "diskFitNote").exists, "the buffer isn't marked as not fitting")
+        screenshot(app, "low-disk-2-settings")
+
+        let fifteen = app.buttons["15 s"]
+        XCTAssertTrue(fifteen.waitForExistence(timeout: 5))
+        fifteen.tap()
+        let hd720 = app.buttons["720p"]
+        XCTAssertTrue(hd720.waitForExistence(timeout: 5))
+        hd720.tap()
+        screenshot(app, "low-disk-3-settings-fit")
+
+        app.buttons["doneButton"].tap()
+        let save = app.buttons["saveButton"]
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: save)], timeout: 15)
+        XCTAssertFalse(element(app, "lowDiskBanner").exists, "still says there is no space")
+        screenshot(app, "low-disk-4-recording")
+    }
+
     @MainActor
     func testChangeBufferTo60Seconds() {
         let app = launch()

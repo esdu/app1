@@ -19,7 +19,6 @@ protocol BufferStorage: Sendable {
     /// Deletes leftovers from a previous process that can't be a finished clip, and creates the folders.
     /// Returns the number of items removed.
     @discardableResult func removeOrphans() -> Int
-    func availableCapacity() -> Int64?
 }
 
 /// A finished clip that is kept in `unsavedDirectory` until Photos accepts it.
@@ -174,10 +173,8 @@ struct FileBufferStorage: BufferStorage {
         return removed
     }
 
-    func availableCapacity() -> Int64? {
-        let values = try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        return values?.volumeAvailableCapacityForImportantUsage
-    }
+    /// Free space on the volume holding these folders (issue #10). Read through `AppEnvironment.diskCapacity`.
+    var capacity: VolumeDiskCapacity { VolumeDiskCapacity(volumeURL: root) }
 
     /// Recursive on-disk size of a directory (allocated bytes of regular files).
     static func directorySize(_ url: URL) -> Int64 {

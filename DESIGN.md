@@ -30,7 +30,7 @@ Photos as one clip. The app has no network code, no accounts and no analytics.
 | Capture | `FrameSource` protocol: `CameraFrameSource` (AVCaptureSession) and `SyntheticFrameSource` (test-pattern `CVPixelBuffer`s + silent PCM) | `SyntheticFrameSource` in manual mode (frames generated as fast as the encoder takes them, with synthetic timestamps) |
 | Buffer | `RollingRecorder` (writer + segment files) and `SegmentRing` (pure eviction policy) | unit tests, no camera needed |
 | Export | `ClipExporter`: concatenate init + segments, trim with `AVMutableComposition`, passthrough export to `.mov` | unit tests load the result with `AVURLAsset` and decode every frame |
-| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore`, `AppSettingsOpener`, `DelayScheduler` (all protocols) | fakes in tests and in `-UITestMode` |
+| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore`, `AppSettingsOpener`, `DelayScheduler`, `DiskCapacityProvider` (all protocols) | fakes in tests and in `-UITestMode` |
 | UI | SwiftUI; `AppModel` is the single source of truth | XCUITest with `-UITestMode` |
 
 ### Threading (Swift 6 strict concurrency)
@@ -462,7 +462,7 @@ Example: 1080p30 with 120 s gives 1.258 MB/s × 123 s × 1.5 ≈ **232 MB**.
 **Worst case during a save**: ring cap + post-roll segments (≤ 30 s × rate, hard-linked)
 + concatenated temp file (≤ clip) + exported `.mov` (≤ clip, in `UnsavedClips/`). For 4K60, 120 s and
 30 s post-roll that is about 1.15 GB + 0.19 GB + 2 × 0.94 GB ≈ 3.2 GB for a few seconds. For the default (1080p30, 30 s,
-no post-roll) it is about 60 MB + 2 × 38 MB ≈ 136 MB. The segments and the temp file are deleted as
+no post-roll) it is about 62 MB + 2 × 38 MB ≈ 138 MB. The segments and the temp file are deleted as
 soon as the export finishes; the `.mov` as soon as Photos has the clip. The Photos staging link adds no
 bytes.
 
@@ -470,6 +470,71 @@ bytes.
 (≤ (N + post-roll) × rate, e.g. 38 MB for the default, ≈ 0.94 GB for 4K60 with 120 s + 30 s) in
 Application Support until a Retry succeeds. They are counted in `BufferStorage.unsavedClips()`
 (`UnsavedClip.bytes`). The app never deletes them on its own; there is no in-app delete yet.
+
+### Free space (issue #10)
+
+The ring bounds what RewindCam itself keeps, but not what the phone has left. Without a check, a nearly
+full phone fails segment writes one by one (holes in the buffer, a small red error) and a save runs
+out of space half-way. The low-disk guard reads free space and acts on fixed rules derived from the
+table above, never on constants per preset.
+
+**Reading free space.** `DiskCapacityProvider` on `AppEnvironment` (`environment.diskCapacity`) is the
+only reader. Live: `VolumeDiskCapacity` reads `volumeAvailableCapacityForImportantUsageKey` of the
+Caches volume (the required-reason API declared as `E174.1`: the result decides whether recording
+starts and is shown to the user). Tests and `-UITestLowDisk` use `FakeDiskCapacity`. A `nil` answer
+(unknown, e.g. some Simulator volumes) always counts as enough, so it never blocks recording.
+
+**Policy.** `DiskSpacePolicy` (pure value, `BufferMath.swift`) holds every threshold; `AppModel` only
+asks it. Built from buffer length, the preset actually recorded, "Record sound" and post-roll:
+
+* `requiredBytesToBuffer` = ring cap + **reserve** (`BufferMath.reserveBytes`, 64 MB).
+* `requiredBytesToSave` = post-roll segments + concatenated `source.mp4` + exported `.mov`
+  = `rate × postRoll + 2 × rate × (N + postRoll)` at the nominal rate (the "worst case during a save"
+  above, minus the ring): 75.5 MB for the defaults, 2.07 GB for 4K60 / 120 s / +30 s. The post-roll
+  term is what the save's hard links keep after the ring evicts it; the Photos staging link is free.
+
+| When | Condition | What happens |
+|---|---|---|
+| Start (launch, foreground, Try Again, quality/thermal restart, a longer buffer) | free < `requiredBytesToBuffer` | capture doesn't start: phase `.outOfSpace`, red **"Not recording: not enough free space"** banner, Save disabled, badge "NO SPACE" |
+| | free < `requiredBytesToBuffer + requiredBytesToSave` | records, orange **"Storage is low"** banner |
+| Recording, every 5 s (status loop, after the watchdog) | free < reserve | stops cleanly: recorder suspended (ring deleted, a pending post-roll settled with what is there), camera stopped, screen woken from Dim, failure haptic, same red banner |
+| | free + ring bytes < `requiredBytesToBuffer + requiredBytesToSave` | keeps recording, orange banner |
+| Save | free < `requiredBytesToSave` | **saves anyway**, orange warning toast; if the export then fails, its error toast adds "Storage is low: free up space" |
+
+Choices the issue left open, and why:
+
+* **Reserve 64 MB** (decimal, like the table). It must exceed what the ring can grow between two checks;
+  the worst is 4K60 at the 1.5 overhead: 6.26 MB/s × 1.5 × 5 s ≈ 47 MB. A unit test checks this for
+  every preset.
+* **Check every 5 s**, counted on `environment.monotonicClock` from the last read (start, a buffer
+  change or the previous check), not on each 0.5 s tick. It is skipped while pipeline work or
+  recovery runs, or while not recording.
+* **The ring's own bytes count as available while recording.** They are already on disk; comparing raw
+  free space with `requiredBytesToBuffer + requiredBytesToSave` would warn as soon as the ring filled
+  on a phone that had room for it. Stopping deletes the ring, so "free up about X" is measured after it.
+* **"Free up about X"** is the shortfall to `requiredBytesToBuffer + requiredBytesToSave`: after freeing
+  it, recording starts with no warning. The out-of-space banner says where (Settings › General › iPhone
+  Storage) and offers the in-app alternative (shorter buffer, lower quality).
+* **Try Again, not Open Settings.** RewindCam's Settings page can't free space and iOS has no public
+  link to iPhone Storage. Besides Try Again, capture re-checks on return to the foreground (like a
+  failed start) and whenever the buffer length or quality changes, so lowering either in RewindCam's
+  Settings starts recording as soon as it fits. Nothing retries on a timer.
+* **A longer buffer chosen while recording** is checked like a start (free + ring bytes against
+  `requiredBytesToBuffer`) and stops recording if it can't fit, instead of growing into the reserve.
+* **Unsaved clips** (#1) are never deleted or evicted to make room. The banners say how many there are
+  and how much they take ("2 clips waiting for Photos use 76 MB."), and Settings lists them.
+* **Settings** shows free space under the buffer picker, marks the current buffer at the current quality
+  in red when it doesn't fit (orange when only a save may not fit), and lists the buffer lengths that
+  don't fit.
+
+**Estimates, not reservations.** These are pre-checks on nominal sizes. A save can still fail if VBR
+peaks or other apps use the space meanwhile; it then fails with a message, and the guard stops capture
+at the reserve. Bounding queued fragment data and accounting for the actual temporary working set
+(hard-link vs copy fallback, export peaks) is issue #14, which reuses `DiskCapacityProvider` and
+`DiskSpacePolicy` rather than adding thresholds of its own.
+
+Not covered by CI: the real `volumeAvailableCapacityForImportantUsage` on a full phone (it includes
+purgeable space iOS frees on demand, so it can read higher than Settings shows), and real write failures.
 
 **Orphans**: `Caches/RewindBuffer/`, `Caches/RewindClips/` and stray `UnsavedClips/*.partial.mov`
 are removed on every launch, before capture starts. They can only hold leftovers from a previous
@@ -511,6 +576,7 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   `-UITestDenyMicrophone` makes the synthetic source report a denied microphone and emit no audio.
   `-UITestDenyCamera` makes its start throw `.cameraAccessDenied` until Open Settings is tapped (standing
   in for the user allowing it), and `-UITestNoCamera` makes it throw `.noCamera` (Try Again path).
+  `-UITestLowDisk` makes free space read 90 MB (the low-disk guard, issue #10).
 * **Not covered by CI**: `CameraFrameSource` (including the real camera and microphone prompts and
   their failure paths), `AVCaptureEventInteraction` (volume buttons),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),

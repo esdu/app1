@@ -53,6 +53,13 @@ source, because the Simulator has no camera.*
   before is gone; if video stops again, it stops, wakes the screen from Dim and shows "Not recording"
   with **Try Again**. A save waiting for its post-roll is finished at once with the footage there is
   (the toast says the clip ends early), or fails with a message saying to save again.
+- **Low-disk guard**: RewindCam checks free space before it starts buffering, every 5 s while it
+  records, and when you tap Save. Without room for the buffer it doesn't start, and says how much to
+  free and where, or to choose a shorter buffer or lower quality (lowering either in Settings starts
+  recording once it fits). If space runs low while recording it stops cleanly, before writes fail;
+  when only a save might not fit it keeps recording and warns. A save is never refused for space, only
+  warned about. Settings shows free space and marks buffer lengths that don't fit. Clips waiting for
+  Photos are never deleted to make room; the warnings say how much they take.
 - **Orphan cleanup**: leftover buffer files and half-written exports from a crash or kill are removed
   on launch. Finished clips that didn't reach Photos are kept.
 - **Voice trigger** (optional, off by default): say "save that". Recognition is **on-device
@@ -97,6 +104,11 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
   is killed after Photos accepted a clip but before the app noticed, Retry can add it twice.
 - Background time for finishing a save, the real Photos permission prompt and Photos import errors
   are not verified on a device yet.
+- **Free space is an estimate.** The low-disk guard compares free space with nominal sizes (DESIGN.md
+  "Free space"); a save can still fail if VBR peaks or other apps use the space meanwhile. iOS's
+  "available for important usage" figure includes purgeable space, so it can be higher than
+  Settings › General › iPhone Storage shows. Tested with a fake free-space value only; real full-phone
+  behaviour is not verified on a device yet.
 - The voice trigger is English (en-US) and needs a device that supports on-device recognition.
 - The camera-denied and start-failure paths are tested with the synthetic source (unit and UI tests);
   the real camera prompt and `CameraFrameSource`'s configuration failures are not verified on a device yet.
@@ -186,6 +198,14 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       The Settings sheet still opens. Tap **Open Settings**: RewindCam's page opens. Allow the camera and
       return (iOS may relaunch the app): recording starts without relaunching by hand, the banner is
       gone, and Save works.
+- [ ] **Nearly full phone**: fill the phone until under 200 MB is free (e.g. record 4K video in
+      Camera.app) and launch RewindCam with the default settings. A red "Not recording: not enough free
+      space" banner says how much to free, Save is greyed out, and no write error appears. In Settings,
+      free space is shown and the 30 s buffer is marked as not fitting; choose 15 s and 720p: recording
+      starts (with an orange "Storage is low" banner if a save may not fit). Save once: the clip is saved
+      or the toast explains why not, never silently. Then, while recording, fill the phone further:
+      within about 5 s of free space falling under 64 MB recording stops with the red banner. Free space
+      and tap **Try Again** (or leave and return): recording starts. Clips waiting for Photos are never deleted.
 - [ ] **Lock during save**: with +10 s post-roll, tap Save and lock the phone at once. After 30 s,
       unlock: the clip is in Photos (or, if not, offered for Retry), never silently gone.
 - [ ] **Locked export (file protection)**: at 4K60 with a 120 s buffer and +30 s post-roll, record
@@ -202,6 +222,7 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
   `-UITestDenyMicrophone` to make the synthetic source behave as if microphone access were denied.
   `-UITestDenyCamera` makes every start fail as if camera access were denied, until **Open Settings** is
   tapped (which stands in for allowing it there); `-UITestNoCamera` makes every start fail with "no camera".
+  `-UITestLowDisk` makes free space read 90 MB: too little for the default buffer, enough for 15 s at 720p.
 - CI ([`.github/workflows/ios.yml`](.github/workflows/ios.yml)): newest macOS runner and newest
   Xcode, iPhone simulator picked dynamically, `xcodebuild test`, then the unit tests four more times as a
   flake check. Per-test timeouts are on (180 s default, 300 s maximum), so a hung test fails by name

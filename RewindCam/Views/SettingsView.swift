@@ -13,12 +13,22 @@ struct SettingsView: View {
                     }
                     .pickerStyle(.segmented)
                     .accessibilityIdentifier("bufferPicker")
+                    // Free space and whether this buffer fits (issue #10).
+                    LabeledContent("Free space", value: model.availableDiskBytes.map { BufferMath.formatted(bytes: $0) } ?? "Unknown")
+                        .accessibilityIdentifier("freeSpaceRow")
+                    if !model.unsavedClips.isEmpty {
+                        LabeledContent("Clips waiting for Photos",
+                                       value: "\(model.unsavedClips.count) · \(BufferMath.formatted(bytes: model.unsavedClipBytes))")
+                            .accessibilityIdentifier("unsavedSpaceRow")
+                    }
+                    DiskFitNote()
                 } header: {
                     Text("Rewind buffer")
                 } footer: {
                     Text("Save keeps the last \(model.settings.bufferSeconds) seconds. "
                          + "The buffer uses at most \(BufferMath.formatted(bytes: model.estimatedBufferBytes)) "
-                         + "of storage at \(model.activePreset.description), and never grows.")
+                         + "of storage at \(model.activePreset.description), and never grows."
+                         + tooLongFooter)
                 }
 
                 Section {
@@ -118,6 +128,7 @@ struct SettingsView: View {
                         .font(.footnote)
                 }
             }
+            .onAppear { model.refreshDiskSpace() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -127,6 +138,14 @@ struct SettingsView: View {
                 }
             }
         }
+    }
+
+    /// Buffer lengths marked as not fitting the free space at the current quality.
+    private var tooLongFooter: String {
+        let tooLong = model.bufferChoicesThatDontFit
+        guard !tooLong.isEmpty else { return "" }
+        let list = tooLong.map { "\($0)\u{00A0}s" }.joined(separator: ", ") // "15 s" never wraps
+        return " Too long for the free space at \(model.activePreset.description): \(list)."
     }
 
     // Explicit bindings: each set goes through `AppModel.updateSettings` (persist + apply).
@@ -150,5 +169,43 @@ struct SettingsView: View {
     }
     private var audioEnabled: Binding<Bool> {
         Binding(get: { model.settings.audioEnabled }, set: { v in model.updateSettings { $0.audioEnabled = v } })
+    }
+}
+
+/// Says whether the chosen buffer fits the free space at the current quality, and whether a save does
+/// (issue #10, `DiskSpacePolicy`). Nothing when both fit or free space is unknown.
+private struct DiskFitNote: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        if let note {
+            Label(note.text, systemImage: note.systemImage)
+                .font(.footnote)
+                .foregroundStyle(note.color)
+                .accessibilityIdentifier("diskFitNote")
+        }
+    }
+
+    private var note: (text: String, systemImage: String, color: Color)? {
+        let seconds = model.settings.bufferSeconds
+        let preset = model.activePreset.description
+        let policy = model.diskPolicy
+        let check = model.diskSpaceCheck(bufferSeconds: seconds)
+        let toFree = BufferMath.formatted(bytes: check.bytesToFree)
+        let where_ = AppModel.storageHint
+        switch check.level {
+        case .tooLow:
+            let needs = BufferMath.formatted(bytes: policy.requiredBytesToBuffer)
+            let text = "Doesn't fit: \(seconds) s at \(preset) needs about \(needs) free. "
+                + "Free up about \(toFree) (\(where_)), or choose a shorter buffer or lower quality."
+            return (text, "externaldrive.badge.xmark", .red)
+        case .saveMayNotFit:
+            let save = BufferMath.formatted(bytes: policy.requiredBytesToSave)
+            let text = "The buffer fits, but a save can need up to \(save) more and may not fit. "
+                + "Free up about \(toFree) (\(where_))."
+            return (text, "externaldrive.badge.exclamationmark", .orange)
+        case .enough:
+            return nil
+        }
     }
 }

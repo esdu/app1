@@ -38,7 +38,7 @@ struct PrivacyManifestTests {
             reasons[category] = try #require(entry["NSPrivacyAccessedAPITypeReasons"] as? [String])
         }
         // UserDefaults (UserDefaultsSettingsStore): app-only defaults -> CA92.1.
-        // volumeAvailableCapacityForImportantUsageKey (FileBufferStorage.availableCapacity):
+        // volumeAvailableCapacityForImportantUsageKey (VolumeDiskCapacity, the low-disk guard of issue #10):
         // check there is enough space to write files -> E174.1.
         #expect(reasons == [
             "NSPrivacyAccessedAPICategoryUserDefaults": ["CA92.1"],
