@@ -214,13 +214,13 @@ extension AppModelTests {
         #expect(h.source.startCount == 1, "the held start did run")
         expectUserPaused(model, h, "the late start left nothing running")
         #expect(h.library.accessRequests == 0, "a stale start doesn't go on to ask for Photos")
-        #expect(model.status.bufferedSeconds == 0)
+        #expect(model.recorder.status().bufferedSeconds == 0)
 
         // Frames that still trickle in reach no buffer.
         h.source.generate(seconds: 2)
         await passTime(10, model, h)
         expectUserPaused(model, h)
-        #expect(model.status.bufferedSeconds == 0)
+        #expect(model.recorder.status().bufferedSeconds == 0)
 
         model.resumeCapture()
         await model.waitForCapture()
