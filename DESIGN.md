@@ -782,6 +782,20 @@ Each change restarts the writer (new generation), and the UI shows a banner such
 "Phone is hot — recording at 720p 30 fps until it cools down." Settings shows the thermal state as
 "Phone temperature" (Normal, Warm, Hot, Very hot).
 
+**Changes while the camera starts (issue #35).** `applyQuality` restarts capture only when the
+configuration differs from the applied one, and nothing is applied while a start is awaited (launch,
+a permission prompt, the restart for an earlier change, a frame-stall restart). So every source start
+goes through `AppModel.startSource`, which compares `captureConfiguration` again when the start
+returns and, if a setting (camera, resolution, frame rate, Record sound, the voice trigger's
+microphone) or the thermal level changed meanwhile, starts again with the newest configuration before
+anything is published: `.recording` is reached only with what the settings ask for, and the recorder
+is configured from that start's `ActiveCapture` (sound turned on with the microphone denied shows the
+microphone notice). Free space is checked again when the change grows the buffer (#10). Each extra
+start answers a change made during the previous one, so repeated changes settle on the newest without
+a loop; `applyQuality` queues no restart of its own while `startSource` runs. After every `await` it
+checks the caller's generation (or recovery id), so a pause or background during the start still
+wins (#15).
+
 Resolutions are offered only where the camera has a 30 fps format for them; 60 fps is offered for all.
 `CameraFrameSource` picks the requested frame rate and falls back to 30 fps when the camera has no 60 fps
 format at that resolution. The labels and the bitrate still follow the setting, so such a clip is 30 fps

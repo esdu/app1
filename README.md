@@ -132,7 +132,8 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - **Some changes clear the buffer.** Changing resolution, frame rate, camera or "Record sound" (or turning
   the voice trigger on or off while "Record sound" is off), and a thermal step-down, restart the writer and
   clear the buffer: segments from different encoder settings can't be joined without re-encoding. A new
-  buffer length or post-roll applies without a restart.
+  buffer length or post-roll applies without a restart. A change made while the camera is still starting
+  restarts it once more, so recording begins with the newest settings.
 - **A save resolves about 1 s after the tap** (plus any post-roll), when the segment containing the tap
   is complete. The clip still ends exactly at the tap. If less than the buffer length has been recorded
   (for example just after launch), the clip is whatever exists.
