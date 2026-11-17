@@ -77,10 +77,42 @@ final class RecorderHarness {
             + "fragments queued \(q.count) (peak \(q.peakCount), admitted \(q.admitted), rejected \(q.rejected))"
     }
 
-    /// Save with `postRoll`, keep "recording" `extra` seconds, then export.
-    func saveClip(postRoll: Double = 0, thenRecord extra: Double) async throws -> ExportedClip {
+    /// Feeds `seconds` of frames the way a camera does to a writer that keeps up with it: each video frame
+    /// only once the writer's video input is ready for it. Use it with `realTime: true`. A real-time input
+    /// drops a frame it isn't ready for (`RollingRecorder.waitUntilReady`), and a back-to-back burst
+    /// (`source.generate`) outruns the encoder by however much the machine's load allows, so how many
+    /// frames survive, and so which segments exist, would vary from run to run. Paced, no frame is
+    /// dropped and the segments are the ones the offline writer produces.
+    func generatePaced(seconds: Double) async throws {
+        let frame = 1 / Double(frameRate)
+        let end = now + seconds - frame / 2
+        while now < end {
+            try await waitUntilVideoInputReady()
+            source.generate(seconds: frame) // exactly one video frame (and the audio up to it)
+        }
+    }
+
+    /// Returns once the current writer's video input takes more data (at once if there is no writing
+    /// writer: the next frame starts one, or is handled as a writer failure).
+    func waitUntilVideoInputReady(timeout: Double = 30) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while let writer = recorder.activeWriter, writer.status == .writing,
+              let input = writer.inputs.first(where: { $0.mediaType == .video }), !input.isReadyForMoreMediaData {
+            if Date() > deadline {
+                throw TimeoutError(description: "the video input never became ready; \(diagnostics)")
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
+    /// Save with `postRoll`, keep "recording" `extra` seconds (`paced`: as `generatePaced`), then export.
+    func saveClip(postRoll: Double = 0, thenRecord extra: Double, paced: Bool = false) async throws -> ExportedClip {
         let ticket = recorder.beginSave(postRoll: postRoll)
-        source.generate(seconds: extra)
+        if paced {
+            try await generatePaced(seconds: extra)
+        } else {
+            source.generate(seconds: extra)
+        }
         let bundle = try await awaitBundle(ticket)
         defer { bundle.discard() }
         return try keep(try await ClipExporter.export(bundle))

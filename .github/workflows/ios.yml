@@ -63,12 +63,32 @@ jobs:
             -destination "id=${{ steps.sim.outputs.udid }}" \
             -resultBundlePath "$RESULT_BUNDLE" \
             -only-testing:RewindCamTests \
+            -skip-testing:RewindCamTests/TempFlakeRepro \
             -parallel-testing-enabled NO \
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 180 \
             -maximum-test-execution-time-allowance 300 \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee xcodebuild.log | { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
+
+      - name: TEMP load repro
+        if: always()
+        continue-on-error: true
+        run: |
+          rc=0
+          xcodebuild test-without-building \
+            -project RewindCam.xcodeproj \
+            -scheme RewindCam \
+            -destination "id=${{ steps.sim.outputs.udid }}" \
+            -only-testing:RewindCamTests/TempFlakeRepro \
+            -resultBundlePath LoadRepro.xcresult \
+            -parallel-testing-enabled NO \
+            CODE_SIGNING_ALLOWED=NO > load.log 2>&1 || rc=$?
+          grep -n -i -E 'TEMPDIAG|recorded an issue|failed|passed after|error' load.log | head -120 || true
+          xcrun xcresulttool get test-results summary --path LoadRepro.xcresult > load-summary.json || true
+          xcrun xcresulttool get test-results tests --path LoadRepro.xcresult > load-tests.json || true
+          python3 scripts/summarize-xcresult.py load-summary.json load-tests.json --title "TEMP load repro" || true
+          exit $rc
 
       - name: Stress unit tests (flake detector)
         # Re-runs the unit tests (not UI tests) a few times on the already-built products,
@@ -79,10 +99,9 @@ jobs:
             -project RewindCam.xcodeproj \
             -scheme RewindCam \
             -destination "id=${{ steps.sim.outputs.udid }}" \
-            -only-testing:RewindCamTests/RecorderTests \
-            -only-testing:RewindCamTests/WorkingSetRecorderTests \
-            -only-testing:RewindCamTests/AppModelTests \
-            -test-iterations 20 -run-tests-until-failure \
+            -only-testing:RewindCamTests \
+            -skip-testing:RewindCamTests/TempFlakeRepro \
+            -test-iterations 12 -run-tests-until-failure \
             -resultBundlePath StressResults.xcresult \
             -parallel-testing-enabled NO \
             -test-timeouts-enabled YES \
