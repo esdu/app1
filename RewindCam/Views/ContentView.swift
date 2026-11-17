@@ -261,6 +261,8 @@ private struct BannerArea: View {
                 Banners()
             }
             .scrollBounceBehavior(.basedOnSize)
+            // Shows there is more to read below the visible banners.
+            .scrollIndicatorsFlash(onAppear: true)
             .accessibilityIdentifier("bannerScroll")
         }
     }
@@ -611,8 +613,6 @@ private struct PauseResumeButton: View {
                 .contentShape(Capsule())
         }
         .buttonStyle(.plain)
-        // Scales well past the default sizes, but not so far that the Save row runs out of room.
-        .dynamicTypeSize(...DynamicTypeSize.accessibility3)
         .accessibilityLabel(paused ? "Resume recording" : "Pause recording")
         .accessibilityHint(paused
             ? "Turns the camera back on and starts filling the buffer again."

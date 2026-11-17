@@ -7,7 +7,7 @@ import XCTest
 ///   that the status bar, the Pause, Dim, Save and Settings controls are on screen, hittable and don't
 ///   overlap. Screenshots `a11y-*` are published by CI to be checked by eye.
 /// * `testAccessibilityAudit` runs `performAccessibilityAudit()` on the main screen (recording, dimmed,
-///   paused) and Settings. Exclusions are listed, with the reason, in `AuditLog.excuse(_:)`.
+///   paused) and Settings. Exclusions are listed, with the reason, in `AuditLog.excuse`.
 final class AccessibilityUITests: XCTestCase {
 
     /// The largest Dynamic Type size (Settings › Accessibility › Display & Text Size › Larger Text, all
@@ -79,6 +79,7 @@ final class AccessibilityUITests: XCTestCase {
 
     @MainActor
     func testLargestTextKeepsEverythingReachable() throws {
+        continueAfterFailure = true // check every screen, so one run reports everything
         let app = launch(Self.largestText + ["-UITestDenyMicrophone", "-UITestLowDiskWarning", "-UITestPhotosFailOnce"])
         waitUntilRecording(app)
         XCTAssertTrue(element(app, "microphoneBanner").waitForExistence(timeout: 10), "no microphone banner")
@@ -128,6 +129,7 @@ final class AccessibilityUITests: XCTestCase {
 
     @MainActor
     func testAccessibilityAudit() throws {
+        continueAfterFailure = true // audit every screen, so one run reports everything
         let app = launch([])
         waitUntilRecording(app)
         // Contrast is checked on the paused screen below (black preview): here the background is the
@@ -164,26 +166,40 @@ final class AccessibilityUITests: XCTestCase {
 }
 
 /// Collects what `performAccessibilityAudit` reports, excuses the documented exceptions, and fails the
-/// test once with every remaining issue listed (so one CI run shows all of them).
+/// test once with every remaining issue listed (so one CI run shows all of them). Excused issues are
+/// attached to the test as text.
 final class AuditLog: @unchecked Sendable { // only touched on the main thread, inside the audit
     private(set) var problems: [String] = []
     private(set) var excused: [String] = []
+    /// Frames of the elements whose text is deliberately capped (`cappedTextElements`), on this screen.
+    private let cappedFrames: [String: CGRect]
+    private let screen: CGRect
+
+    private init(cappedFrames: [String: CGRect], screen: CGRect) {
+        self.cappedFrames = cappedFrames
+        self.screen = screen
+    }
 
     @MainActor
-    static func run(on app: XCUIApplication, _ screen: String, types: XCUIAccessibilityAuditType,
+    static func run(on app: XCUIApplication, _ screenName: String, types: XCUIAccessibilityAuditType,
                     test: XCTestCase, file: StaticString = #filePath, line: UInt = #line) throws {
-        let log = AuditLog()
+        var capped: [String: CGRect] = [:]
+        for id in cappedTextElements {
+            let e = app.descendants(matching: .any).matching(identifier: id).firstMatch
+            if e.exists { capped[id] = e.frame }
+        }
+        let log = AuditLog(cappedFrames: capped, screen: app.windows.firstMatch.frame)
         try app.performAccessibilityAudit(for: types) { issue in
             MainActor.assumeIsolated { log.handle(issue) }
         }
         if !log.excused.isEmpty {
             let note = XCTAttachment(string: log.excused.joined(separator: "\n"))
-            note.name = "audit-excused-\(screen)"
+            note.name = "audit-excused-\(screenName)"
             note.lifetime = .keepAlways
             test.add(note)
         }
         XCTAssertTrue(log.problems.isEmpty,
-                      "Accessibility audit, \(screen): \(log.problems.count) issue(s):\n"
+                      "Accessibility audit, \(screenName): \(log.problems.count) issue(s):\n"
                           + log.problems.joined(separator: "\n"),
                       file: file, line: line)
     }
@@ -191,11 +207,13 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     /// Always true: the issue is recorded here, not by XCTest, so all of them are listed together.
     @MainActor
     private func handle(_ issue: XCUIAccessibilityAuditIssue) -> Bool {
-        let identifier = issue.element.flatMap { $0.exists ? $0.identifier : nil } ?? ""
-        let label = issue.element.flatMap { $0.exists ? $0.label : nil } ?? ""
-        let line = "[\(Self.name(issue.auditType))] id=\"\(identifier)\" label=\"\(label)\": "
-            + "\(issue.compactDescription) — \(issue.detailedDescription)"
-        if let reason = Self.excuse(issue.auditType, identifier: identifier) {
+        let element = issue.element.flatMap { $0.exists ? $0 : nil }
+        let identifier = element?.identifier ?? ""
+        let label = element?.label ?? ""
+        let frame = element?.frame
+        let line = "[\(Self.name(issue.auditType))] id=\"\(identifier)\" label=\"\(label)\" "
+            + "frame=\(frame.map { "\($0)" } ?? "?"): \(issue.compactDescription) — \(issue.detailedDescription)"
+        if let reason = excuse(issue.auditType, identifier: identifier, frame: frame) {
             excused.append(line + " (excused: \(reason))")
         } else {
             problems.append(line)
@@ -204,21 +222,30 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     }
 
     /// Documented exclusions (issue #11). Everything else fails the test.
-    static func excuse(_ type: XCUIAccessibilityAuditType, identifier: String) -> String? {
-        switch type {
-        case .dynamicType where cappedTextElements.contains(identifier):
-            return "text deliberately capped at an accessibility size to fit a fixed shape; shows the large content viewer"
-        default:
-            return identifier == "fakeLibraryCount" ? "UI-test-only label, not shown in the app" : nil
+    private func excuse(_ type: XCUIAccessibilityAuditType, identifier: String, frame: CGRect?) -> String? {
+        if identifier == "fakeLibraryCount" { return "UI-test-only label, not shown in the app" }
+        if type == .dynamicType, cappedFrames[identifier] != nil {
+            return "\(identifier) is capped at an accessibility size on purpose; it shows the large content viewer"
         }
+        // The audit reports the text inside such an element (no identifier of its own): match by frame.
+        if type == .dynamicType, let frame,
+           let owner = cappedFrames.first(where: { $0.value.insetBy(dx: -1, dy: -1).contains(frame) })?.key {
+            return "text in \(owner), capped at an accessibility size on purpose to fit its fixed shape; "
+                + "the element shows the large content viewer"
+        }
+        // A row running past the bottom of the screen in a scrolling list is cut by the screen edge, not
+        // truncated; the test scrolls and audits again.
+        if type == .textClipped, let frame, !screen.contains(frame) {
+            return "only partly on screen (scrolling content), not truncated"
+        }
+        return nil
     }
 
     /// Elements whose text stops growing at an accessibility size (ContentView: status pills, round icon
-    /// buttons, the Save circle, Pause/Resume, the background reminder, the toast).
-    static let cappedTextElements: Set<String> = [
+    /// buttons, the Save circle, the background reminder, the toast).
+    static let cappedTextElements: [String] = [
         "recordingBadge", "bufferLabel", "presetLabel", "batteryLabel",
-        "dimButton", "settingsButton", "saveButton", "pauseButton", "resumeButton",
-        "backgroundNotice", "toast",
+        "dimButton", "settingsButton", "saveButton", "backgroundNotice", "toast",
     ]
 
     static func name(_ type: XCUIAccessibilityAuditType) -> String {
