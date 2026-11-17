@@ -22,6 +22,8 @@ final class ModelHarness {
     let appSettings = FakeAppSettingsOpener()
     /// Status loop and recovery backoff: nothing runs until a test calls `scheduler.advance(by:)`.
     let scheduler = FakeDelayScheduler()
+    /// Free space the model sees (issue #10). Unknown (nil) by default: treated as enough.
+    let disk = FakeDiskCapacity(availableBytes: nil)
     /// The recorder's real-time mode (drop a sample when the encoder isn't ready). Off by default, so
     /// appends wait and every frame is encoded; on where a test feeds one track without the other.
     let realTime: Bool
@@ -49,7 +51,8 @@ final class ModelHarness {
             settingsStore: UserDefaultsSettingsStore(defaults: defaults), thermal: thermal,
             battery: battery, screen: screen, haptics: haptics,
             realTime: realTime, fakeLibrary: library, supportsCaptureButtons: false,
-            backgroundTasks: backgroundTasks, appSettings: appSettings, scheduler: scheduler, voice: voice,
+            backgroundTasks: backgroundTasks, appSettings: appSettings, scheduler: scheduler,
+            diskCapacity: disk, voice: voice,
             clock: clock, monotonicClock: scheduler)
     }
 

@@ -112,6 +112,7 @@ private struct RecordingBadge: View {
         case .paused: "PAUSED"
         case .cameraDenied: "OFF"
         case .failed: "ERROR"
+        case .outOfSpace: "NO SPACE"
         }
     }
 }
@@ -163,6 +164,10 @@ private struct Banners: View {
             }
             // Video stopped and the camera was restarted on its own (frame watchdog, issue #9).
             if let notice = model.stallNotice {
+                NoticeBanner(notice: notice)
+            }
+            // Recording, but free space is low enough that a save may not fit (issue #10).
+            if let notice = model.diskSpaceNotice {
                 NoticeBanner(notice: notice)
             }
             if let error = model.status.lastError {
@@ -300,13 +305,15 @@ private struct ToastView: View {
 
     var body: some View {
         if let toast = model.toast {
-            Label(toast.message, systemImage: toast.isError ? "xmark.octagon.fill" : "checkmark.circle.fill")
+            Label(toast.message, systemImage: toast.isError ? "xmark.octagon.fill"
+                  : toast.isWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                 .font(.callout.weight(.semibold))
                 .foregroundStyle(.white)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 12)
                 .background(.black.opacity(0.75), in: Capsule())
-                .overlay(Capsule().stroke(toast.isError ? Color.red : Color.green, lineWidth: 1.5))
+                .overlay(Capsule().stroke(toast.isError ? Color.red : toast.isWarning ? Color.orange : Color.green,
+                                          lineWidth: 1.5))
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("toast")
                 .id(toast.id)

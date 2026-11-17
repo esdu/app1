@@ -25,6 +25,8 @@ struct AppEnvironment {
     var appSettings: AppSettingsOpener
     /// The model's timers: the status loop and capture-recovery backoff (issue #4). Tests: `FakeDelayScheduler`.
     var scheduler: DelayScheduler
+    /// Free space on the media volume (issue #10), judged by `DiskSpacePolicy`. Tests: `FakeDiskCapacity`.
+    var diskCapacity: DiskCapacityProvider
     /// On-device "save that" recogniser (nil where unsupported, e.g. UI tests).
     var voice: VoiceTrigger? = nil
     var clock: WallClock = SystemWallClock()
@@ -44,17 +46,22 @@ struct AppEnvironment {
     /// With `-UITestMode`: a few seconds after capture starts, the synthetic camera stops delivering
     /// video (while still "running") until it is restarted: the frame watchdog's case (issue #9).
     static let uiTestStallVideoArgument = "-UITestStallVideo"
+    /// With `-UITestMode`: free space reads as `uiTestLowDiskBytes` (90 MB), too little for the default
+    /// 30 s buffer at 1080p 30 fps but enough for 15 s at 720p 30 fps (issue #10).
+    static let uiTestLowDiskArgument = "-UITestLowDisk"
+    static let uiTestLowDiskBytes: Int64 = 90_000_000
 
     static func current(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         arguments.contains(uiTestArgument) ? uiTest(arguments: arguments) : live()
     }
 
     static func live() -> AppEnvironment {
-        AppEnvironment(
+        let storage = FileBufferStorage.standard
+        return AppEnvironment(
             isUITest: false,
             source: CameraFrameSource(),
             photoLibrary: SystemPhotoLibrary(),
-            storage: FileBufferStorage.standard,
+            storage: storage,
             settingsStore: UserDefaultsSettingsStore(),
             thermal: SystemThermalMonitor(),
             battery: SystemBatteryMonitor(),
@@ -66,6 +73,7 @@ struct AppEnvironment {
             backgroundTasks: SystemBackgroundTasks(),
             appSettings: SystemAppSettingsOpener(),
             scheduler: SystemDelayScheduler(),
+            diskCapacity: storage.capacity,
             voice: SpeechVoiceTrigger()
         )
     }
@@ -95,6 +103,12 @@ struct AppEnvironment {
         if arguments.contains(uiTestStallVideoArgument) {
             source.stallVideoOnce(afterStartBy: 3)
         }
+        let diskCapacity: DiskCapacityProvider
+        if arguments.contains(uiTestLowDiskArgument) {
+            diskCapacity = FakeDiskCapacity(availableBytes: uiTestLowDiskBytes)
+        } else {
+            diskCapacity = storage.capacity
+        }
         let appSettings = UITestAppSettingsOpener { [source] in
             if denyCamera { source.setStartError(nil) }
         }
@@ -113,7 +127,8 @@ struct AppEnvironment {
             supportsCaptureButtons: false,
             backgroundTasks: SystemBackgroundTasks(),
             appSettings: appSettings,
-            scheduler: SystemDelayScheduler()
+            scheduler: SystemDelayScheduler(),
+            diskCapacity: diskCapacity
         )
     }
 }

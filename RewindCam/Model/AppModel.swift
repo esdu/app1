@@ -6,6 +6,8 @@ struct Toast: Equatable, Identifiable {
     let id = UUID()
     let message: String
     let isError: Bool
+    /// Not a failure, but something to know (e.g. a save started with low storage, issue #10).
+    var isWarning = false
 }
 
 enum SaveTrigger: Sendable {
@@ -35,11 +37,15 @@ final class AppModel {
         case cameraDenied
         /// Capture couldn't start for another reason (no camera, configuration failed). Try Again.
         case failed(String)
+        /// Not enough free space to keep the buffer (issue #10): capture didn't start, or stopped when
+        /// free space fell below the reserve. See `startFailureNotice` and `DiskSpacePolicy`.
+        case outOfSpace(DiskSpaceCheck)
 
-        /// The last start attempt failed; nothing is captured until a start succeeds.
+        /// The last start attempt failed (or capture stopped for lack of space); nothing is captured
+        /// until a start succeeds: Try Again, the foreground re-check, or (out of space) a settings change.
         var isStartFailure: Bool {
             switch self {
-            case .cameraDenied, .failed: true
+            case .cameraDenied, .failed, .outOfSpace: true
             default: false
             }
         }
@@ -79,6 +85,11 @@ final class AppModel {
     /// Set when an automatic restart after a frame stall (issue #9) brought recording back; drives
     /// `stallNotice` until the buffer has refilled or capture stops. nil otherwise.
     private(set) var recoveredStall: RecoveredStall?
+    /// The last free-space check while capture runs (issue #10); drives `diskSpaceNotice`. nil when
+    /// capture isn't running.
+    private(set) var diskSpace: DiskSpaceCheck?
+    /// Free space as last read (start, periodic check, save, Settings sheet); nil if unknown or not read.
+    private(set) var availableDiskBytes: Int64?
 
     /// A frame stall that an automatic restart recovered from: what stalled and when it restarted.
     struct RecoveredStall: Equatable {
@@ -107,6 +118,8 @@ final class AppModel {
     /// Checks on every status tick that video and segments keep arriving (issue #9); see `checkFrameWatchdog()`.
     @ObservationIgnored private(set) var frameWatchdog = FrameWatchdog()
     @ObservationIgnored private var statusLoopRunning = false
+    /// When the free space was last read for `checkDiskSpace()` (monotonic seconds).
+    @ObservationIgnored private var lastDiskCheck: TimeInterval?
     /// The ordered source-event channel (issue #4); see `handle(_:)`.
     private let captureEvents: AsyncStream<CaptureChannelItem>.Continuation
     /// Source events handled so far (tests compare it with how many were emitted).
@@ -188,6 +201,76 @@ final class AppModel {
 
     var isVoiceAvailable: Bool { environment.voice?.isAvailable ?? false }
 
+    // MARK: Free space (issue #10; DESIGN.md §2 "Bounded disk" → "Free space")
+
+    /// The free-space policy for the current settings at the preset actually recorded. Sized with the
+    /// "Record sound" setting rather than what the source delivers: before a start that isn't known yet,
+    /// and the audio track only ever makes the estimate larger (64 kb/s).
+    var diskPolicy: DiskSpacePolicy { diskSpacePolicy(bufferSeconds: settings.bufferSeconds) }
+
+    func diskSpacePolicy(bufferSeconds: Int) -> DiskSpacePolicy {
+        DiskSpacePolicy(bufferSeconds: bufferSeconds, preset: activePreset, audioEnabled: settings.audioEnabled,
+                        postRollSeconds: settings.postRollSeconds)
+    }
+
+    /// Total size of the finished clips kept for Photos (#1). They use free space like any file, and
+    /// RewindCam never deletes them to make room; the notices say how much they take.
+    var unsavedClipBytes: Int64 { unsavedClips.reduce(0) { $0 + $1.bytes } }
+
+    /// "2 clips waiting for Photos use 76 MB." (empty when there are none).
+    var unsavedClipsSpaceSentence: String {
+        let count = unsavedClips.count
+        guard count > 0 else { return "" }
+        let size = BufferMath.formatted(bytes: unsavedClipBytes)
+        return count == 1 ? "1 clip waiting for Photos uses \(size)." : "\(count) clips waiting for Photos use \(size)."
+    }
+
+    /// Where on the phone to free space. RewindCam can't open that page, so the notices name it.
+    static let storageHint = "Settings › General › iPhone Storage"
+
+    /// The out-of-space message (issue #10): what doesn't fit, about how much to free (enough for the
+    /// buffer and one save), the in-app alternative, and what unsaved clips take.
+    func outOfSpaceMessage(_ check: DiskSpaceCheck) -> String {
+        var message = "Not enough free space to keep a \(settings.bufferSeconds) s buffer at \(activePreset). "
+            + "Free up about \(BufferMath.formatted(bytes: check.bytesToFree)) (\(Self.storageHint)) "
+            + "or choose a shorter buffer or lower quality in Settings."
+        let unsaved = unsavedClipsSpaceSentence
+        if !unsaved.isEmpty { message += " " + unsaved }
+        return message
+    }
+
+    /// Shown while recording with free space between the reserve and room for the buffer plus a save
+    /// (issue #10): recording continues, but a save may not fit.
+    var diskSpaceNotice: AppNotice? {
+        guard phase == .recording, let check = diskSpace, check.level == .saveMayNotFit else { return nil }
+        let free = check.availableBytes.map { BufferMath.formatted(bytes: $0) } ?? "little"
+        var message = "About \(free) free. A save at these settings can need up to "
+            + "\(BufferMath.formatted(bytes: diskPolicy.requiredBytesToSave)), so it may end early or fail. "
+            + "Recording stops if free space falls below \(BufferMath.formatted(bytes: DiskSpacePolicy.reserveBytes)). "
+            + "Free up about \(BufferMath.formatted(bytes: check.bytesToFree)) (\(Self.storageHint))."
+        let unsaved = unsavedClipsSpaceSentence
+        if !unsaved.isEmpty { message += " " + unsaved }
+        return AppNotice(id: "lowDiskWarningBanner", systemImage: "externaldrive.badge.exclamationmark",
+                         title: "Storage is low", message: message, severity: .warning, action: nil)
+    }
+
+    /// Settings sheet: would a `bufferSeconds` buffer at the current quality fit in the free space?
+    /// The running ring's bytes count as available (a new buffer length reuses or deletes them).
+    func diskSpaceCheck(bufferSeconds: Int) -> DiskSpaceCheck {
+        diskSpacePolicy(bufferSeconds: bufferSeconds)
+            .beforeBuffering(availableBytes: availableDiskBytes.map { $0 + status.bytes })
+    }
+
+    /// Buffer lengths that don't fit at the current quality (Settings lists them).
+    var bufferChoicesThatDontFit: [Int] {
+        RecordingSettings.bufferChoices.filter { diskSpaceCheck(bufferSeconds: $0).level == .tooLow }
+    }
+
+    /// Reads free space now (the Settings sheet calls this when it opens).
+    func refreshDiskSpace() {
+        availableDiskBytes = environment.diskCapacity.availableBytes()
+    }
+
     static let photosDeniedHint = "Photos access is off. Saved clips stay in RewindCam until you allow it "
         + "in Settings › RewindCam › Photos, then tap Retry."
 
@@ -261,6 +344,13 @@ final class AppModel {
         case .failed(let why):
             AppNotice(id: "errorBanner", systemImage: "exclamationmark.triangle.fill", title: "Not recording",
                       message: why, severity: .error, action: .tryAgain)
+        case .outOfSpace(let check):
+            // Try Again, not Open Settings: RewindCam's page in Settings can't free space, and iOS has no
+            // public link to iPhone Storage, so the message names it. The app also checks again on
+            // return to the foreground and when the buffer or quality changes in Settings.
+            AppNotice(id: "lowDiskBanner", systemImage: "externaldrive.badge.xmark",
+                      title: "Not recording: not enough free space", message: outOfSpaceMessage(check),
+                      severity: .error, action: .tryAgain)
         default:
             nil
         }
@@ -293,6 +383,7 @@ final class AppModel {
         case .paused: "Recording is paused."
         case .cameraDenied: "Camera access is off, so nothing is being recorded."
         case .failed: "The camera isn't running, so nothing is being recorded."
+        case .outOfSpace: "There isn't enough free space to record."
         }
     }
 
@@ -402,6 +493,13 @@ final class AppModel {
         let effective = QualityGovernor.effectivePreset(user: settings.preset, thermal: thermalLevel)
         thermalMessage = QualityGovernor.message(user: settings.preset, effective: effective, thermal: thermalLevel)
         activePreset = effective
+        if wantsRunning, case .outOfSpace = phase {
+            // Stopped for lack of space: a shorter buffer or lower quality may fit now (issue #10).
+            recorder.reconfigure(recorderConfiguration)
+            refreshStatus()
+            retryStart()
+            return
+        }
         let capture = captureConfiguration
         if wantsRunning, let applied = appliedCapture, applied != capture {
             schedulePipeline { model in
@@ -411,6 +509,17 @@ final class AppModel {
         } else {
             // Buffer length changes apply in place without losing footage.
             recorder.reconfigure(recorderConfiguration)
+            // A longer buffer is checked like a start (issue #10): it must fit next to what the ring
+            // already holds, or recording stops with the out-of-space notice instead of filling the disk.
+            if wantsRunning, phase == .recording, pipelineDepth == 0 {
+                let ringBytes = recorder.status().bytes
+                let check = diskPolicy.beforeBuffering(availableBytes: readDiskSpace().map { $0 + ringBytes })
+                if check.level == .tooLow {
+                    schedulePipeline { model in await model.stopForLowDisk(check) }
+                } else {
+                    diskSpace = check
+                }
+            }
         }
         refreshStatus()
     }
@@ -438,16 +547,28 @@ final class AppModel {
             showToast("Can't save. \(reason)", isError: true)
             return nil
         }
+        // Issue #10: low free space never refuses a save (a shorter clip beats none); it warns.
+        let available = environment.diskCapacity.availableBytes()
+        availableDiskBytes = available
+        let lowSpace = diskPolicy.beforeSave(availableBytes: available).level == .saveMayNotFit
         let postRoll = Double(settings.postRollSeconds)
         let ticket = recorder.beginSave(postRoll: postRoll)
         isSaving = true
         let background = environment.backgroundTasks.begin(name: "Save clip")
         if trigger == .voice { environment.haptics.success() }
-        if postRoll > 0, !ticket.isFulfilled {
+        let recordingMore = postRoll > 0 && !ticket.isFulfilled
+        if lowSpace {
+            let free = BufferMath.formatted(bytes: available ?? 0)
+            let need = BufferMath.formatted(bytes: diskPolicy.requiredBytesToSave)
+            showToast("Storage is low: about \(free) free, and this save can need up to \(need). "
+                      + "Saving anyway; the clip may end early or fail."
+                      + (recordingMore ? " Recording \(settings.postRollSeconds) s more…" : ""),
+                      isWarning: true)
+        } else if recordingMore {
             showToast("Saving… recording \(settings.postRollSeconds) s more")
         }
         return Task {
-            await exportAndAddToPhotos(ticket)
+            await exportAndAddToPhotos(ticket, lowSpace: lowSpace)
             isSaving = false
             refreshStatus()
             environment.backgroundTasks.end(background)
@@ -489,7 +610,7 @@ final class AppModel {
         }
     }
 
-    private func exportAndAddToPhotos(_ ticket: SaveTicket) async {
+    private func exportAndAddToPhotos(_ ticket: SaveTicket, lowSpace: Bool) async {
         let exported: (clip: UnsavedClip, duration: Double, endedEarly: Bool)
         do {
             exported = try await exportDurably(ticket)
@@ -497,7 +618,9 @@ final class AppModel {
             // Includes a post-roll settled with nothing buffered because video stopped (#9):
             // `RecorderError.videoStopped` says to save again once recording is back.
             environment.haptics.failure()
-            showToast(error.localizedDescription, isError: true)
+            showToast(error.localizedDescription
+                      + (lowSpace ? " Storage is low: free up space (\(Self.storageHint)), then save again." : ""),
+                      isError: true)
             return
         }
         let clip = exported.clip
@@ -600,8 +723,8 @@ final class AppModel {
 
     // MARK: Toast
 
-    func showToast(_ message: String, isError: Bool = false) {
-        let toast = Toast(message: message, isError: isError)
+    func showToast(_ message: String, isError: Bool = false, isWarning: Bool = false) {
+        let toast = Toast(message: message, isError: isError, isWarning: isWarning)
         self.toast = toast
         toastTask?.cancel()
         toastTask = Task { [weak self] in
@@ -648,6 +771,15 @@ final class AppModel {
         let capture = captureConfiguration
         // The recorder ignores samples until it is configured for what the source really delivers.
         recorder.suspend()
+        // Issue #10: room for the ring (the old one was just deleted) and the reserve, or don't start.
+        let space = diskPolicy.beforeBuffering(availableBytes: readDiskSpace())
+        guard space.level != .tooLow else {
+            await stopCapture()
+            phase = .outOfSpace(space)
+            refreshStatus()
+            return
+        }
+        diskSpace = space
         do {
             let active = try await environment.source.start(capture)
             activeCapture = active
@@ -670,17 +802,7 @@ final class AppModel {
     /// why and offers the fix. Recovery is only ever a new `bringUp` through the pipeline: Try Again
     /// (`retryStart`) or the foreground re-check in `scenePhaseChanged(.active)`.
     private func startFailed(_ error: Error) async {
-        endRecovery()
-        frameWatchdog.disarm()
-        recoveredStall = nil
-        sourceInterruption = nil
-        appliedCapture = nil
-        activeCapture = nil
-        stopVoice()
-        // A failed reconfigure can leave a half-built session running; the recorder is already suspended.
-        await environment.source.stop()
-        environment.screen.setIdleTimerDisabled(false)
-        previewImage = nil // no stale frame that looks live
+        await stopCapture()
         if let error = error as? FrameSourceError, error == .cameraAccessDenied {
             phase = .cameraDenied
         } else {
@@ -688,10 +810,29 @@ final class AppModel {
         }
     }
 
+    /// What a failed start, a given-up recovery and an out-of-space stop share: no recovery, watchdog,
+    /// voice or disk warning, the source stopped, the screen allowed to lock, no stale preview. The
+    /// caller sets the phase that says why; the recorder is already suspended.
+    private func stopCapture() async {
+        endRecovery()
+        frameWatchdog.disarm()
+        recoveredStall = nil
+        sourceInterruption = nil
+        diskSpace = nil
+        appliedCapture = nil
+        activeCapture = nil
+        stopVoice()
+        // A failed reconfigure can leave a half-built session running.
+        await environment.source.stop()
+        environment.screen.setIdleTimerDisabled(false)
+        previewImage = nil // no stale frame that looks live
+    }
+
     private func tearDown(reason: InterruptionReason?) async {
         endRecovery()
         frameWatchdog.disarm()
         recoveredStall = nil
+        diskSpace = nil
         sourceInterruption = nil
         stopVoice()
         await environment.source.stop()
@@ -740,7 +881,7 @@ final class AppModel {
         guard automaticCaptureAllowed else { return }
         switch phase {
         case .recording, .paused, .starting: break
-        case .idle, .cameraDenied, .failed: return
+        case .idle, .cameraDenied, .failed, .outOfSpace: return
         }
         switch sourceInterruption {
         case .runtimeError(let why)?:
@@ -773,7 +914,7 @@ final class AppModel {
         guard automaticCaptureAllowed else { return }
         switch phase {
         case .recording, .paused, .starting: break
-        case .idle, .cameraDenied, .failed: return
+        case .idle, .cameraDenied, .failed, .outOfSpace: return
         }
         recorder.suspend()
         frameWatchdog.disarm()
@@ -926,11 +1067,58 @@ final class AppModel {
         }
     }
 
-    /// One status-loop tick: refresh what the UI shows, then the safety net, then the frame watchdog.
+    /// One status-loop tick: refresh what the UI shows, then the safety net, then the frame watchdog,
+    /// then (every `DiskSpacePolicy.checkInterval`) the free-space check.
     func statusTick() {
         refreshStatus()
         reconcileCapture()
         checkFrameWatchdog()
+        checkDiskSpace()
+    }
+
+    /// Reads free space through `environment.diskCapacity`; the periodic check's interval restarts.
+    private func readDiskSpace() -> Int64? {
+        lastDiskCheck = environment.monotonicClock.seconds
+        let available = environment.diskCapacity.availableBytes()
+        availableDiskBytes = available
+        return available
+    }
+
+    /// **Free-space check** (issue #10), on the status loop after the frame watchdog, at most every
+    /// `DiskSpacePolicy.checkInterval` (5 s; the 0.5 s tick is needlessly often for a volume query), and
+    /// only while recording with no pipeline work. Below the reserve, capture stops cleanly
+    /// (`stopForLowDisk`) before segment writes can fail; between the reserve and room for buffer + save,
+    /// `diskSpaceNotice` warns. Unknown free space counts as enough.
+    private func checkDiskSpace() {
+        guard automaticCaptureAllowed, phase == .recording, pipelineDepth == 0 else { return }
+        if let last = lastDiskCheck,
+           environment.monotonicClock.seconds - last < DiskSpacePolicy.checkInterval - 1e-6 { return }
+        let available = readDiskSpace()
+        let check = diskPolicy.whileRecording(availableBytes: available, ringBytes: recorder.status().bytes)
+        guard check.level == .tooLow else {
+            diskSpace = check
+            return
+        }
+        schedulePipeline { model in await model.stopForLowDisk(check) }
+    }
+
+    /// Stops capture because free space ran out (issue #10). The recorder is suspended first: its ring is
+    /// deleted, and a save waiting for its post-roll is settled with what is there (a running export
+    /// carries on). Then the camera stops, the screen wakes from Dim and the out-of-space notice says
+    /// why. Capture stays stopped until Try Again, the foreground re-check or a settings change finds
+    /// room. Finished clips in `UnsavedClips/` are never touched.
+    private func stopForLowDisk(_ check: DiskSpaceCheck) async {
+        guard automaticCaptureAllowed else { return }
+        switch phase {
+        case .recording, .paused, .starting: break
+        case .idle, .cameraDenied, .failed, .outOfSpace: return
+        }
+        recorder.suspend()
+        setDimmed(false)
+        environment.haptics.failure()
+        await stopCapture()
+        phase = .outOfSpace(check)
+        refreshStatus()
     }
 
     /// **Frame watchdog** (issue #9), run on every status tick after the safety net. While capture is
