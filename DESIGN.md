@@ -420,6 +420,11 @@ recorder's `RecorderStatus` on every status tick by `AppModel.checkFrameWatchdog
   → "Not recording — The camera stopped (no new video arrived for 5 s) and couldn't be restarted." with
   Try Again. A user start (launch, foreground, Try Again) begins a new episode. A camera that delivers
   a few frames after each restart and stops again therefore can't make the app restart forever.
+* **Audio without video.** The recorder drops audio more than `RollingRecorder.maxAudioLead` (1 s)
+  past the newest video frame. The writer interleaves audio with video, so when the camera stops and
+  the microphone doesn't, audio can only pile up in it. The UI test caught the consequence: appends
+  blocked the recorder queue, so the watchdog's own `suspend()` froze the main thread at the moment
+  of the stall. Capture delivers both on one clock within a few hundred ms, so normal audio is untouched.
 * **Telling the user.** After a restart that works, `AppModel.stallNotice` (orange `AppNotice`, no
   action) says that video had stopped, when the camera was restarted, and that the footage from before
   is gone; it clears once the buffer is full again, or when capture stops or restarts from the user.
