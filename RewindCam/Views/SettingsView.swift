@@ -144,7 +144,7 @@ struct SettingsView: View {
     private var tooLongFooter: String {
         let tooLong = model.bufferChoicesThatDontFit
         guard !tooLong.isEmpty else { return "" }
-        let list = tooLong.map { "\($0) s" }.joined(separator: ", ")
+        let list = tooLong.map { "\($0)\u{00A0}s" }.joined(separator: ", ") // "15 s" never wraps
         return " Too long for the free space at \(model.activePreset.description): \(list)."
     }
 
