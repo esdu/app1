@@ -31,7 +31,7 @@ baby monitor, and says so in README.md and at the end of Settings.
 | Capture | `FrameSource` protocol: `CameraFrameSource` (AVCaptureSession) and `SyntheticFrameSource` (test-pattern `CVPixelBuffer`s + silent PCM) | `SyntheticFrameSource` in manual mode (frames generated as fast as the encoder takes them, with synthetic timestamps) |
 | Buffer | `RollingRecorder` (writer + segment files) and `SegmentRing` (pure eviction policy) | unit tests, no camera needed |
 | Export | `ClipExporter`: concatenate init + segments, trim with `AVMutableComposition`, passthrough export to `.mov` | unit tests load the result with `AVURLAsset` and decode every frame |
-| Side effects | on `AppEnvironment`: `PhotoLibrary`, `BufferStorage`, `SettingsStore`, `ThermalMonitor`, `BatteryMonitor`, `ScreenController`, `Haptics`, `AccessibilityAnnouncer`, `BackgroundTasks`, `AppSettingsOpener`, `DelayScheduler`, `DiskCapacityProvider`, `VoiceTrigger`, `WallClock`, `MonotonicClock`; and `MediaClock` for the synthetic source's timestamps (all protocols) | fakes in unit tests; `-UITestMode` swaps the camera, Photos, settings store, Settings opener and (with `-UITestLowDisk*`) free space |
+| Side effects | on `AppEnvironment`: `PhotoLibrary`, `BufferStorage`, `SettingsStore`, `ThermalMonitor`, `BatteryMonitor`, `ScreenController`, `Haptics`, `AccessibilityAnnouncer`, `BackgroundTasks`, `AppSettingsOpener`, `DelayScheduler`, `DiskCapacityProvider`, `VoiceTrigger`, `WallClock`, `MonotonicClock`, `DeviceOrientationSensor`; and `MediaClock` for the synthetic source's timestamps (all protocols) | fakes in unit tests; `-UITestMode` swaps the camera, Photos, settings store, Settings opener and (with `-UITestLowDisk*`) free space |
 | UI | SwiftUI; `AppModel` is the single source of truth | XCUITest with `-UITestMode` |
 
 ### Threading (Swift 6 strict concurrency)
@@ -279,6 +279,74 @@ On interruption (call, another app takes the camera, backgrounding, runtime erro
 
 The trade-off: a quality change (user or thermal) clears the buffer. That is simple and always
 correct. The UI says so.
+
+### Orientation (issue #37)
+
+The interface is portrait-only, and capture used to be too: every clip was saved for a phone held
+upright, so one filmed with the phone propped up sideways played sideways in Photos. Two fixes were
+possible (the issue lists both):
+
+1. **Follow the device**: rotate the capture connection to the horizon-level angle
+   (`AVCaptureDevice.RotationCoordinator`). A turn changes the frame size, which starts a new writer
+   generation and **clears the buffer**.
+2. **Keep the capture fixed and turn the clip**: keep every buffer upright for the portrait interface
+   and give each saved clip a `preferredTransform` for the way the phone was held.
+
+**Chosen: 2.** The buffer is the product. Under option 1 the natural sequence "something starts to
+happen, the parent turns the phone to frame it, taps Save" would save only the seconds since the turn:
+the turn itself throws away exactly the footage the app exists to keep, and a debounce or a post-roll
+gate can only delay that loss, not avoid it. With option 2, turning the phone costs nothing, at any
+time, and needs no notice. Its cost: **one orientation per clip**. If the phone is turned while the
+buffered seconds (or the post-roll) are being recorded, the part filmed the other way plays sideways.
+A clip is one moment, usually filmed one way, so this is the rarer and milder failure.
+
+How it works:
+
+* **Capture is fixed.** `CameraFrameSource` sets the video data output's connection to
+  `CaptureGeometry.portraitRotationAngle` (90°) and mirrors the front camera (`CaptureGeometry.isMirrored`),
+  as before. Frame dimensions never depend on how the phone is held, so `RollingRecorder` never sees a
+  size change from a turn. Orientation is not part of `CaptureConfiguration`.
+* **Sensing.** `MotionOrientationSensor` (`AppEnvironment.orientation`, started by `AppModel.init`)
+  reads the accelerometer at 10 Hz. Gravity, not `UIDevice.orientation`, because the latter stops
+  changing under Portrait Orientation Lock, which most people who prop a phone up have on.
+  `OrientationClassifier` maps a sample to portrait, landscape left/right or upside down with 15° of
+  hysteresis past each 45° midpoint, and decides nothing when the phone lies within about 20° of flat
+  (the screen's direction then says nothing about "up"). `OrientationTracker` then **debounces**: a new
+  orientation counts only once it has been held for 0.5 s, so picking the phone up to tap Save, or a bump
+  on a stand, doesn't turn the clip. Where there is no accelerometer (the Simulator) it stays portrait.
+* **Sampled at the tap.** `AppModel.save` reads `clipOrientationAtTap` once, right after the recorder
+  notes the tap, and hands it to the export. Turning the phone during the post-roll or the export
+  changes nothing, so no gate is needed. It doesn't depend on the camera session, so it also works for a
+  volume-button or voice save.
+* **Turning the clip.** `ClipExporter` sets the composition's video track `preferredTransform` to the
+  source track's own transform (the writer's identity) followed by `ClipOrientation.transform`: a
+  rotation by `clockwiseQuarterTurns` quarter turns, translated so the frame lands on
+  `(0, 0, displaySize)`. Passthrough export keeps it, with no re-encode; Photos and every player honour
+  it. A clip from a phone held in landscape is landscape (e.g. 1920×1080 displayed from 1080×1920 frames).
+* **Front camera.** A phone turned clockwise by k quarters sees the scene turned anticlockwise by k in a
+  buffer that shows the scene as the screen does. The back camera's buffer does (a window); so does the
+  front camera's, because it is mirrored (a mirror: its x axis runs along the phone's own). So both
+  cameras turn their clips by k (`CaptureGeometry.bufferMatchesScreen`). An unmirrored front buffer
+  would have to turn the other way, and `ClipOrientation` handles that case too, so switching the
+  front camera's mirroring off later would keep clips upright. `OrientationTests` checks every
+  orientation, camera and mirroring against an independent model of where the scene's "up" lands in the
+  buffer.
+* **Preview.** The preview layer uses the same fixed portrait angle. With a portrait-only interface the
+  screen turns with the phone, so a portrait-upright picture is a window onto the scene: upright
+  relative to the scene however the phone is held (only the controls and text turn with the phone, as in
+  the system Camera app). What could go wrong was the angle being lost: `CameraFrameSource` replaces its
+  inputs on every reconfiguration (camera, quality, sound), which rebuilds the preview layer's
+  connection, and the angle was only set once when the view was made. `CameraPreview` now sets it again
+  on `CameraFrameSource.didConfigureNotification`, on joining a window, and on layout.
+
+Tests (`OrientationTests`): the classifier (each orientation, tilted back on a stand, flat, hysteresis
+both ways), the tracker (brief tilts, settling between samples, flicker, flat), the live sensor's
+timestamps on an injected clock, the transform against the physics model and the display rectangle,
+real exports for every orientation and camera (the `.mov`'s `preferredTransform`, display size, and
+every frame decodes), and model tests with `FakeOrientationSensor`: turning while recording keeps the
+writer generation and the source running and the buffer in the clip; turning back during the post-roll
+leaves the clip turned for the tap; the front camera turns like the back. The accelerometer, real
+Photos display and the camera's mirroring are on the device checklist (README §5).
 
 ### What the source delivers (microphone denied)
 
@@ -811,7 +879,8 @@ at the 60 fps bitrate (README "Known limits"; the device checklist checks it).
   to the default non-real-time writer, whose appends wait for the encoder instead of dropping; the one
   model test with a real-time writer (`audioDoesNotMaskVideoStall`) doesn't depend on which frames survive.
 * **Not covered by CI**: `CameraFrameSource` (including the real camera and microphone prompts and
-  their failure paths), `AVCaptureEventInteraction` (volume buttons),
+  their failure paths), `AVCaptureEventInteraction` (volume buttons), the accelerometer and how a
+  turned clip and the preview look on a real phone (§2, "Orientation"),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),
   background-task time after locking the phone, Data Protection (the Simulator doesn't enforce it),
   battery drain, real peak storage and memory at 4K60 with slow storage (issue #14's bounds are

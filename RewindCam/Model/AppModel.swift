@@ -207,6 +207,8 @@ final class AppModel {
         }
         // A phone that is already hot at launch shows the banner; only later changes are announced.
         announcedThermalMessage = thermalMessage
+        // Issue #37: follows how the phone is held, so a save can turn its clip upright.
+        environment.orientation.start()
         refreshStatus()
     }
 
@@ -666,6 +668,8 @@ final class AppModel {
         let lowSpace = diskPolicy.beforeSave(availableBytes: available).level == .saveMayNotFit
         let postRoll = Double(settings.postRollSeconds)
         let ticket = recorder.beginSave(postRoll: postRoll)
+        // Issue #37: the clip is turned for the way the phone is held now, at the tap.
+        let orientation = clipOrientationAtTap
         isSaving = true
         let background = environment.backgroundTasks.begin(name: "Save clip")
         if trigger == .voice { environment.haptics.success() }
@@ -681,7 +685,7 @@ final class AppModel {
             showToast("Saving… recording \(settings.postRollSeconds) s more")
         }
         return Task {
-            await exportAndAddToPhotos(ticket, lowSpace: lowSpace)
+            await exportAndAddToPhotos(ticket, lowSpace: lowSpace, orientation: orientation)
             isSaving = false
             refreshStatus()
             environment.backgroundTasks.end(background)
@@ -733,10 +737,10 @@ final class AppModel {
         }
     }
 
-    private func exportAndAddToPhotos(_ ticket: SaveTicket, lowSpace: Bool) async {
+    private func exportAndAddToPhotos(_ ticket: SaveTicket, lowSpace: Bool, orientation: ClipOrientation) async {
         let exported: (clip: UnsavedClip, duration: Double, endedEarly: Bool, limit: SaveLimit?)
         do {
-            exported = try await exportDurably(ticket)
+            exported = try await exportDurably(ticket, orientation: orientation)
         } catch {
             // Includes a post-roll settled with nothing buffered because video stopped (#9):
             // `RecorderError.videoStopped` says to save again once recording is back.
@@ -784,7 +788,7 @@ final class AppModel {
     /// bundle's actual file sizes) is reserved in `temporarySpace` above `saveFloorBytes`. If only part
     /// fits, the newest part is exported (the clip still ends where asked, `SaveLimit.freeSpace`); if not
     /// even the newest second fits, nothing is written and the error says how much to free.
-    private func exportDurably(_ ticket: SaveTicket) async throws
+    private func exportDurably(_ ticket: SaveTicket, orientation: ClipOrientation) async throws
         -> (clip: UnsavedClip, duration: Double, endedEarly: Bool, limit: SaveLimit?) {
         let storage = environment.storage
         var bundle = try await ticket.bundle()
@@ -807,7 +811,8 @@ final class AppModel {
         let partial = try storage.partialClipURL(baseName: ClipExporter.defaultBaseName())
         do {
             let output = try await ClipExporter.export(bundle, to: partial,
-                                                       outputByteLimit: BufferMath.exportOutputBytes(sourceBytes: source))
+                                                       outputByteLimit: BufferMath.exportOutputBytes(sourceBytes: source),
+                                                       orientation: orientation)
             let clip = try storage.commitPartialClip(output.url)
             // Settled early (`RollingRecorder.resolveEarly` / `settlePendingSave`): footage stops short.
             let endedEarly = bundle.clipEnd < bundle.requestedEnd - 0.5

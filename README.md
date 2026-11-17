@@ -28,6 +28,8 @@ source, because the Simulator has no camera.*
   or the optional **voice trigger** (below). The clip ends at the moment of the trigger (plus any
   post-roll).
 - **Post-roll**: keep recording 0, 5, 10 or 30 s after the trigger, so the clip covers before *and* after.
+- **Any way up**: the controls stay portrait, but a clip saved with the phone held in landscape (or upside
+  down) is saved upright, also with Portrait Orientation Lock on. Turning the phone never clears the buffer.
 - **Photos** with add-only permission (asked right after the camera starts, not during the first save),
   a confirmation toast and a haptic.
 - **Quality**: 720p, 1080p, or 4K where the camera supports it; 30 or 60 fps; sound on or off; front or
@@ -127,6 +129,11 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - **A save resolves about 1 s after the tap** (plus any post-roll), when the segment containing the tap
   is complete. The clip still ends exactly at the tap. If less than the buffer length has been recorded
   (for example just after launch), the clip is whatever exists.
+- **One orientation per clip.** The controls stay portrait, but a clip is turned for the way the phone
+  was held when you saved (upright, landscape left or right, or upside down; held for at least half a
+  second, and a phone lying flat keeps the last one). Turning the phone never clears the buffer, but if
+  you turn it while the buffered seconds or the post-roll are recorded, the part filmed the other way
+  plays sideways. See DESIGN.md §2, "Orientation".
 - **One save at a time.** Until a save has finished (post-roll, export and the Photos import), another
   Save, volume-button press or voice trigger shows "Already saving — hold on…" and saves nothing.
 - **A pause lasts until Resume or until RewindCam is relaunched**: it isn't saved, so a relaunch (also
@@ -180,6 +187,8 @@ the synthetic source and fakes. These are covered only by the [manual checklist]
   configuration failures, front-camera mirroring, 4K and 60 fps support, and sound/picture sync and
   segment joins in saved clips;
 - the volume buttons (`AVCaptureEventInteraction`), also while paused or dimmed;
+- the accelerometer that tells which way the phone is held, and whether a landscape clip shows upright in
+  Photos with either camera (CI checks the saved file's transform, not how Photos shows it);
 - whether a real `AVCaptureSession` behaves as modelled after a runtime error or a media-services reset,
   whether it ever stalls the way the frame watchdog expects, and whether a stop and start cures it;
 - real Photos (permission prompt, denial, import errors) and background time for finishing a save after
@@ -365,6 +374,16 @@ a missing clip with no banner, and never "Export failed".
       **Pass:** each press saves one clip, and the system volume indicator does not appear.
 - [ ] **Front camera**: switch to Front in RewindCam's Settings and save a clip. **Pass:** it is upright
       and mirrored like the preview.
+- [ ] **Landscape** (#37), with Portrait Orientation Lock **on** in Control Center: 30 s buffer, back
+      camera, filming the stopwatch. Hold the phone upright for 20 s, then turn it to landscape with its
+      top to the **left**, film 20 s more and tap Save. Repeat with its top to the **right**. Then switch
+      to Front and do both again, filming yourself holding the stopwatch. **Pass**, for all four:
+      (a) while filming, the preview shows the scene upright both before and after the turn (only the
+      controls turn with the phone); (b) no buffer is lost: the badge doesn't drop when you turn, no
+      notice appears, and the clip lasts 30 s ±1 s, starting about 10 s before the turn; (c) in Photos,
+      from the turn on, the clip plays upright and wider than tall (the 10 s from before the turn play
+      sideways: one orientation per clip); (d) the front-camera clips are mirrored like the preview.
+      Finally save once held upright: that clip is portrait and upright, with either camera.
 - [ ] **Quality**: 4K is offered only where the camera supports it. Save a clip at each of 720p, 1080p and
       (if offered) 4K, at 30 and at 60 fps. **Pass:** each plays smoothly, and Photos' info shows the
       chosen resolution and frame rate (note any 60 fps setting that comes out at 30 fps; see Known
@@ -569,6 +588,7 @@ Hardening (tracking issue #5):
 - [x] #14 Bounded queued fragment data and temporary media working set
 - [x] #15 User Pause / Resume that recovery respects
 - [x] #16 Private clip library assessed: decision note and disabled prototype, not built
+- [x] #37 Landscape clips saved upright: fixed capture, clip turned for the orientation at the save tap
 - [ ] Run the manual device checklist on a real iPhone (not done yet)
 
 ## License
