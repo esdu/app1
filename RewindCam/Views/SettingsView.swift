@@ -129,6 +129,13 @@ struct SettingsView: View {
                          + "and it never uploads anything. Clips go only to your photo library, with add-only access.")
                         .font(.footnote)
                 }
+
+                // What RewindCam is not (issue #12; the same sentence is near the top of README.md).
+                Section {
+                    Text("RewindCam is a camera, not a baby monitor, and doesn't replace supervising your child.")
+                        .font(.footnote)
+                        .accessibilityIdentifier("supervisionNote")
+                }
             }
             .onAppear { model.refreshDiskSpace() }
             .navigationTitle("Settings")
