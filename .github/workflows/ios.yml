@@ -131,8 +131,11 @@ jobs:
                 --title "Stress run (flake detector)" --failures-only; } >> artifacts/test-summary.md || true
           fi
           if [ -f stress.log ]; then
+            # Swift Testing marks failures ✘ ("recorded an issue", "failed after … with N issues"); XCTest
+            # prints "error:" and "Test Case … failed". (Not plain "failed"/"error": test names contain them.)
             echo "=== stress.log: failures, recorded issues and errors ==="
-            grep -n -i -E 'failed|recorded an issue|issue recorded|error' stress.log | head -200 || true
+            grep -n -E '✘|[Rr]ecorded an issue|Issue recorded|error:|Test Case .* failed|TEST .*FAILED|Fatal error' stress.log \
+              | head -200 || true
           fi
           cat artifacts/test-summary.md >> "$GITHUB_STEP_SUMMARY" || true
           cat artifacts/test-summary.md || true
