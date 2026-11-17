@@ -46,6 +46,7 @@ struct VoiceTriggerFailureTests {
     private func failEverySession(_ t: Setup) throws {
         let first = t.engine.sessions.count
         let startedAt = t.scheduler.now
+        let reports = t.gaveUp.current
         try t.failLatest()
         #expect(t.engine.sessions.count == first + 1, "the first failure is restarted at once")
         #expect(t.scheduler.pendingCount == 0)
@@ -58,9 +59,9 @@ struct VoiceTriggerFailureTests {
             t.scheduler.advance(by: 0.25)
             #expect(t.engine.sessions.count == count + 1, "a new session after \(delay) s")
         }
-        #expect(t.gaveUp.current == 0, "still trying")
+        #expect(t.gaveUp.current == reports, "still trying")
         try t.failLatest() // the budget is spent
-        #expect(t.gaveUp.current == 1)
+        #expect(t.gaveUp.current == reports + 1, "reported once")
         #expect(t.engine.sessions.count == first + Self.restarts)
         #expect(t.scheduler.pendingCount == 0, "nothing more is scheduled")
         #expect(t.scheduler.now - startedAt == RestartBackoff.delays.reduce(0, +))
