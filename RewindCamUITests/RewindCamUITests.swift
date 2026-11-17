@@ -171,6 +171,30 @@ final class RewindCamUITests: XCTestCase {
         screenshot(app, "start-failed-2-after-try-again")
     }
 
+    /// `-UITestStallVideo`: a few seconds in, the synthetic camera stops delivering video while it still
+    /// "runs". The frame watchdog (issue #9) notices within about 5 s, restarts the camera once (which
+    /// cures it here) and says so in an orange banner; recording carries on and Save works.
+    @MainActor
+    func testVideoStallRestartsCameraAndSaysSo() {
+        let app = launch(extraArguments: ["-UITestStallVideo"])
+        let banner = element(app, "stallBanner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 40), "no banner after the video stopped")
+        let what = banner.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "restarted the camera")).firstMatch
+        XCTAssertTrue(what.exists, "the banner doesn't say what happened")
+        XCTAssertFalse(element(app, "errorBanner").exists, "one restart cures this stall")
+        screenshot(app, "stall-1-restarted")
+
+        let save = app.buttons["saveButton"]
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: save)], timeout: 10)
+        Thread.sleep(forTimeInterval: 3) // let the new buffer fill a little
+        save.tap()
+        let toast = element(app, "toast")
+        XCTAssertTrue(toast.waitForExistence(timeout: 20), "no confirmation toast")
+        XCTAssertTrue(toast.label.contains("Saved"), "toast says: \(toast.label)")
+        screenshot(app, "stall-2-saved-after-restart")
+    }
+
     @MainActor
     func testChangeBufferTo60Seconds() {
         let app = launch()

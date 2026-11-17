@@ -114,9 +114,9 @@ extension AppModelTests {
         #expect(model.recovery == nil)
         try await expectBuffering(model, h)
 
-        // Nothing else is pending: no stray attempt later.
-        h.scheduler.advance(by: 60)
-        await model.waitForCapture()
+        // Nothing else is pending: no stray attempt later. (The camera keeps delivering meanwhile: since
+        // the frame watchdog, #9, a minute without frames would rightly be a stall.)
+        await passTime(60, model, h, deliver: true)
         #expect(h.source.resumeCount == attempts)
         #expect(model.phase == .recording)
         model.stop()
@@ -283,8 +283,7 @@ extension AppModelTests {
         #expect(model.phase == .recording)
         #expect(model.recovery == nil)
         let resumes = h.source.resumeCount
-        h.scheduler.advance(by: 60)
-        await model.waitForCapture()
+        await passTime(60, model, h, deliver: true) // frames keep coming, so no stall either (#9)
         #expect(h.source.resumeCount == resumes, "the recovery's remaining attempts were dropped")
         #expect(model.phase == .recording)
         model.stop()
@@ -327,10 +326,11 @@ extension AppModelTests {
         let h = ModelHarness()
         defer { h.cleanUp() }
         let model = await startRecording(h)
-        h.scheduler.advance(by: 10)
-        await model.waitForCapture()
+        let starts = h.source.startCount
+        await passTime(10, model, h, deliver: true) // recording normally: frames arrive (#9)
         #expect(model.phase == .recording)
         #expect(h.source.resumeCount == 0)
+        #expect(h.source.startCount == starts)
 
         model.scenePhaseChanged(.background)
         await model.waitForCapture()

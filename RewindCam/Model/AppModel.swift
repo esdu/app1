@@ -76,6 +76,15 @@ final class AppModel {
     private(set) var activeCapture: ActiveCapture?
     /// Automatic capture recovery in progress (issue #4); nil otherwise. See `recoverCapture(_:)`.
     private(set) var recovery: CaptureRecovery?
+    /// Set when an automatic restart after a frame stall (issue #9) brought recording back; drives
+    /// `stallNotice` until the buffer has refilled or capture stops. nil otherwise.
+    private(set) var recoveredStall: RecoveredStall?
+
+    /// A frame stall that an automatic restart recovered from: what stalled and when it restarted.
+    struct RecoveredStall: Equatable {
+        let stall: FrameWatchdog.Stall
+        let restartedAt: Date
+    }
 
     /// One automatic recovery: why it started and how much of its restart budget is spent.
     struct CaptureRecovery: Equatable {
@@ -95,6 +104,8 @@ final class AppModel {
     /// What the source last reported: the interruption in effect, or nil once it said it runs again.
     @ObservationIgnored private var sourceInterruption: InterruptionReason?
     @ObservationIgnored private var recoveryCounter = 0
+    /// Checks on every status tick that video and segments keep arriving (issue #9); see `checkFrameWatchdog()`.
+    @ObservationIgnored private(set) var frameWatchdog = FrameWatchdog()
     @ObservationIgnored private var statusLoopRunning = false
     /// The ordered source-event channel (issue #4); see `handle(_:)`.
     private let captureEvents: AsyncStream<CaptureChannelItem>.Continuation
@@ -255,6 +266,23 @@ final class AppModel {
         }
     }
 
+    /// Shown after the frame watchdog (issue #9) restarted the camera on its own and recording came back:
+    /// says that video had stopped, when the camera was restarted, and that the footage from before is
+    /// gone. Clears itself once the buffer holds a full buffer length again, or when capture stops.
+    var stallNotice: AppNotice? {
+        guard let recoveredStall, phase == .recording else { return nil }
+        let what = switch recoveredStall.stall {
+        case .noVideo: "No new video arrived for \(Int(FrameWatchdog.timeout)) s"
+        case .noSegments: "Video stopped reaching the buffer"
+        }
+        let time = recoveredStall.restartedAt.formatted(date: .omitted, time: .shortened)
+        return AppNotice(id: "stallBanner", systemImage: "exclamationmark.arrow.triangle.2.circlepath",
+                         title: "The camera was restarted",
+                         message: "\(what), so RewindCam restarted the camera at \(time). "
+                             + "Footage from before then is gone; Save has what was recorded since.",
+                         severity: .warning, action: nil)
+    }
+
     /// Why Save can't do anything right now (nil while recording: nothing is buffered in any other
     /// phase). The Save button is disabled and says this in its accessibility hint; a save from the
     /// volume buttons shows it as a toast.
@@ -279,6 +307,9 @@ final class AppModel {
 
     func start() {
         wantsRunning = true
+        // Launch, foreground or Try Again: a fresh session, with a fresh stall budget (issue #9).
+        frameWatchdog.forgetStalls()
+        recoveredStall = nil
         schedulePipeline { model in await model.bringUp() }
     }
 
@@ -366,6 +397,8 @@ final class AppModel {
 
     /// Recomputes the effective preset; restarts capture only if what we capture changed.
     private func applyQuality() {
+        // A new writer (or a restart) may be coming: no stall until it has had the full timeout (#9).
+        frameWatchdog.disarm()
         let effective = QualityGovernor.effectivePreset(user: settings.preset, thermal: thermalLevel)
         thermalMessage = QualityGovernor.message(user: settings.preset, effective: effective, thermal: thermalLevel)
         activePreset = effective
@@ -457,10 +490,12 @@ final class AppModel {
     }
 
     private func exportAndAddToPhotos(_ ticket: SaveTicket) async {
-        let exported: (clip: UnsavedClip, duration: Double)
+        let exported: (clip: UnsavedClip, duration: Double, endedEarly: Bool)
         do {
             exported = try await exportDurably(ticket)
         } catch {
+            // Includes a post-roll settled with nothing buffered because video stopped (#9):
+            // `RecorderError.videoStopped` says to save again once recording is back.
             environment.haptics.failure()
             showToast(error.localizedDescription, isError: true)
             return
@@ -476,7 +511,11 @@ final class AppModel {
             savedClipCount += 1
             lastPhotosError = nil
             environment.haptics.success()
-            showToast("Saved \(Int(exported.duration.rounded())) s clip to Photos")
+            let seconds = Int(exported.duration.rounded())
+            // Recording stopped (interruption, or video stopped arriving, #9) before the clip's end.
+            showToast(exported.endedEarly
+                ? "Saved \(seconds) s clip to Photos. It ends early: recording stopped before the end you asked for."
+                : "Saved \(seconds) s clip to Photos")
         } catch {
             photosFailed(error)
         }
@@ -484,7 +523,8 @@ final class AppModel {
 
     /// Waits for the segments, exports to `<name>.partial.mov` in the unsaved-clips folder and renames
     /// it to `.mov` only once the export is complete. The job folder in Caches is always discarded.
-    private func exportDurably(_ ticket: SaveTicket) async throws -> (clip: UnsavedClip, duration: Double) {
+    private func exportDurably(_ ticket: SaveTicket) async throws
+        -> (clip: UnsavedClip, duration: Double, endedEarly: Bool) {
         let storage = environment.storage
         let bundle = try await ticket.bundle()
         defer { bundle.discard() }
@@ -492,7 +532,9 @@ final class AppModel {
         do {
             let output = try await ClipExporter.export(bundle, to: partial)
             let clip = try storage.commitPartialClip(output.url)
-            return (clip, output.duration)
+            // Settled early (`RollingRecorder.resolveEarly` / `settlePendingSave`): footage stops short.
+            let endedEarly = bundle.clipEnd < bundle.requestedEnd - 0.5
+            return (clip, output.duration, endedEarly)
         } catch {
             try? FileManager.default.removeItem(at: partial)
             throw error
@@ -601,6 +643,7 @@ final class AppModel {
         phase = .starting
         // A fresh start supersedes any recovery and anything the previous session reported.
         endRecovery()
+        frameWatchdog.disarm()
         sourceInterruption = nil
         let capture = captureConfiguration
         // The recorder ignores samples until it is configured for what the source really delivers.
@@ -628,6 +671,8 @@ final class AppModel {
     /// (`retryStart`) or the foreground re-check in `scenePhaseChanged(.active)`.
     private func startFailed(_ error: Error) async {
         endRecovery()
+        frameWatchdog.disarm()
+        recoveredStall = nil
         sourceInterruption = nil
         appliedCapture = nil
         activeCapture = nil
@@ -645,6 +690,8 @@ final class AppModel {
 
     private func tearDown(reason: InterruptionReason?) async {
         endRecovery()
+        frameWatchdog.disarm()
+        recoveredStall = nil
         sourceInterruption = nil
         stopVoice()
         await environment.source.stop()
@@ -662,7 +709,7 @@ final class AppModel {
     //   in emission order. Nothing else feeds source state in; later features (frame watchdog #9,
     //   user pause #15) read or extend this, they don't add a second stream.
     // * One recovery entry point: `recoverCapture(_:)`. Callers: a runtime-error event, the status-loop
-    //   safety net (`reconcileCapture()`), and the frame watchdog (#9).
+    //   safety net (`reconcileCapture()`), and the frame watchdog (#9, `checkFrameWatchdog()`).
     // * Every automatic path checks `automaticCaptureAllowed`; #15's explicit pause belongs there.
 
     /// Whether automatic paths (event handling, recovery, the safety net) may bring capture back.
@@ -701,12 +748,15 @@ final class AppModel {
         case let reason?:
             // iOS ends ordinary interruptions itself and says so; restarting meanwhile can't help.
             endRecovery()
+            frameWatchdog.disarm()
             recorder.suspend()
             phase = .paused(reason.message)
         case nil:
             // A stale "running again" mid-recovery: wait for the restart (or the safety net) instead.
-            if recovery != nil, environment.source.runState != .running { return }
+            // A stalled source (#9) says it runs all along, so only its restart ends that recovery.
+            if let recovery, recovery.reason.isStall || environment.source.runState != .running { return }
             endRecovery()
+            frameWatchdog.disarm() // re-armed on the next status tick, with a full timeout
             recorder.resume()
             phase = .recording
             startVoiceIfNeeded()
@@ -726,10 +776,14 @@ final class AppModel {
         case .idle, .cameraDenied, .failed: return
         }
         recorder.suspend()
+        frameWatchdog.disarm()
         phase = .paused(reason.pausedMessage)
         guard recovery == nil else { return }
         recoveryCounter += 1
-        recovery = CaptureRecovery(id: recoveryCounter, reason: reason)
+        // A frame stall gets `FrameWatchdog.automaticRestartsPerStall` restarts per episode; after that
+        // the recovery starts with a spent budget, i.e. gives up at once through the usual path.
+        let budget = reason.isStall && !frameWatchdog.mayRestartAutomatically ? RestartBackoff.spent : RestartBackoff()
+        recovery = CaptureRecovery(id: recoveryCounter, reason: reason, backoff: budget)
         scheduleRecoveryAttempt()
     }
 
@@ -762,6 +816,31 @@ final class AppModel {
         switch reason {
         case .runtimeError, .sourceStopped:
             return await environment.source.resumeRunning()
+        case .stalled:
+            return await restartStalledSource()
+        }
+    }
+
+    /// A stalled source still reports `.running`, so `resumeRunning()` would change nothing: stop it and
+    /// start it again with the current configuration -- `tearDown` + `bringUp`, but keeping the recovery
+    /// and the phase, which `attemptRecovery` owns. The recorder stays suspended until recording
+    /// resumes (`applySourceState`), so nothing from the old session reaches the new buffer.
+    private func restartStalledSource() async -> Bool {
+        stopVoice()
+        recorder.suspend()
+        await environment.source.stop()
+        let capture = captureConfiguration
+        do {
+            let active = try await environment.source.start(capture)
+            activeCapture = active
+            appliedCapture = capture
+            recorder.reconfigure(recorderConfiguration)
+            return environment.source.runState == .running
+        } catch {
+            // Not running; the backoff tries again, then gives up with Try Again.
+            appliedCapture = nil
+            activeCapture = nil
+            return false
         }
     }
 
@@ -773,6 +852,9 @@ final class AppModel {
         if running {
             // Its `.interruptionEnded` is in the channel too; applying it here as well means the
             // outcome doesn't depend on which of the two is handled first.
+            if case .stalled(let stall) = current.reason {
+                recoveredStall = RecoveredStall(stall: stall, restartedAt: environment.clock.now())
+            }
             endRecovery()
             sourceInterruption = nil
             applySourceState()
@@ -809,6 +891,8 @@ final class AppModel {
             endRecovery()
             applySourceState()
         case (.running, .paused):
+            // A stalled source (#9) "runs" without delivering: only its restart ends that recovery.
+            if recovery?.reason.isStall == true { return }
             sourceInterruption = nil
             endRecovery()
             applySourceState()
@@ -842,15 +926,46 @@ final class AppModel {
         }
     }
 
-    /// One status-loop tick: refresh what the UI shows, then the safety net. The frame watchdog (#9)
-    /// belongs here too.
+    /// One status-loop tick: refresh what the UI shows, then the safety net, then the frame watchdog.
     func statusTick() {
         refreshStatus()
         reconcileCapture()
+        checkFrameWatchdog()
+    }
+
+    /// **Frame watchdog** (issue #9), run on every status tick after the safety net. While capture is
+    /// meant to run and the app records -- source running, recorder taking samples, no recovery or
+    /// pipeline work -- `FrameWatchdog` checks that new video frames and segments keep arriving, timed
+    /// on `environment.monotonicClock`. Anything else disarms it, and the first tick after re-arms it,
+    /// so a start, restart, interruption or reconfiguration always gets the full timeout.
+    ///
+    /// On a stall: a save waiting for its post-roll is settled at once with the footage already
+    /// buffered (or an actionable error), since that post-roll will never arrive; then
+    /// `recoverCapture(.stalled)` says so in the phase and restarts the source, once per stall
+    /// episode. If the restarted source stalls again, the recovery gives up into "Not recording"
+    /// with Try Again and wakes the screen (`giveUpRecovery`).
+    private func checkFrameWatchdog() {
+        let current = recorder.status()
+        guard automaticCaptureAllowed, phase == .recording, recovery == nil, pipelineDepth == 0,
+              environment.source.runState == .running, !current.isSuspended else {
+            frameWatchdog.disarm()
+            return
+        }
+        let now = environment.monotonicClock.seconds
+        guard frameWatchdog.isArmed else {
+            frameWatchdog.arm(at: now, status: current)
+            return
+        }
+        guard let stall = frameWatchdog.observe(current, at: now) else { return }
+        recorder.settlePendingSave()
+        recoverCapture(.stalled(stall))
+        refreshStatus()
     }
 
     func refreshStatus() {
         status = recorder.status()
+        // The footage lost in a stall restart (#9) no longer matters once the buffer is full again.
+        if recoveredStall != nil, readySeconds >= settings.bufferSeconds { recoveredStall = nil }
         batteryLevel = environment.battery.level
         isCharging = environment.battery.isCharging
         if let fake = environment.fakeLibrary {

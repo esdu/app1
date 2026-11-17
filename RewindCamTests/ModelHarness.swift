@@ -22,9 +22,14 @@ final class ModelHarness {
     let appSettings = FakeAppSettingsOpener()
     /// Status loop and recovery backoff: nothing runs until a test calls `scheduler.advance(by:)`.
     let scheduler = FakeDelayScheduler()
+    /// The recorder's real-time mode (drop a sample when the encoder isn't ready). Off by default, so
+    /// appends wait and every frame is encoded; on where a test feeds one track without the other.
+    let realTime: Bool
 
     /// A "relaunch" is a second `makeModel()` on the same harness: same storage folders, same fake Photos.
-    init(thermal: ThermalLevel = .nominal, suiteName: String = "RewindCamTests-\(UUID().uuidString)") {
+    init(thermal: ThermalLevel = .nominal, suiteName: String = "RewindCamTests-\(UUID().uuidString)",
+         realTime: Bool = false) {
+        self.realTime = realTime
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("RewindCamModel-\(UUID().uuidString)", isDirectory: true)
         // Separate volatile (Caches) and durable (Application Support) roots, like the app.
@@ -43,9 +48,9 @@ final class ModelHarness {
             isUITest: false, source: source, photoLibrary: library, storage: storage,
             settingsStore: UserDefaultsSettingsStore(defaults: defaults), thermal: thermal,
             battery: battery, screen: screen, haptics: haptics,
-            realTime: false, fakeLibrary: library, supportsCaptureButtons: false,
+            realTime: realTime, fakeLibrary: library, supportsCaptureButtons: false,
             backgroundTasks: backgroundTasks, appSettings: appSettings, scheduler: scheduler, voice: voice,
-            clock: clock)
+            clock: clock, monotonicClock: scheduler)
     }
 
     func makeModel() -> AppModel { AppModel(environment: makeEnvironment()) }

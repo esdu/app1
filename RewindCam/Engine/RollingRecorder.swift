@@ -21,12 +21,17 @@ enum RecorderError: LocalizedError, Equatable {
     case nothingBuffered
     case alreadySaving
     case fileError(String)
+    /// A save waiting for its post-roll was settled because video stopped arriving (issue #9), and
+    /// no footage for it had been buffered.
+    case videoStopped
 
     var errorDescription: String? {
         switch self {
         case .nothingBuffered: "Nothing is buffered yet."
         case .alreadySaving: "Already saving a clip…"
         case .fileError(let why): "Storage error: \(why)"
+        case .videoStopped: "Nothing was saved: video stopped arriving before any footage for this clip was "
+            + "recorded. Save again once RewindCam shows REC."
         }
     }
 }
@@ -308,6 +313,18 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         return ticket
     }
 
+    /// Settles a save that is waiting for its post-roll now, with the segments already linked, or with
+    /// `RecorderError.videoStopped` if there are none (issue #9: frames stopped, so the post-roll would
+    /// never arrive). Recording itself is untouched. Does nothing if no save is pending; a ticket is
+    /// only ever fulfilled once.
+    func settlePendingSave() {
+        queue.sync {
+            guard let p = pending else { return }
+            resolveEarly(p, ifEmpty: .videoStopped)
+            publish()
+        }
+    }
+
     // MARK: AVAssetWriterDelegate
 
     func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData segmentData: Data,
@@ -328,6 +345,11 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     // MARK: - Private (on `queue`)
 
     private var tolerance: Double { 0.5 / Double(max(1, configuration.frameRate)) }
+
+    /// How far (seconds) audio may run ahead of the newest video frame before it is dropped. Capture
+    /// delivers audio and video on one clock within a few hundred ms of each other, so only audio
+    /// without video (a stalled camera) reaches this.
+    static let maxAudioLead: Double = 1
 
     private func append(_ sampleBuffer: CMSampleBuffer, kind: MediaKind) {
         guard !suspended else { return }
@@ -361,6 +383,11 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         case .audio:
             guard let g = generation, let input = g.audioInput, g.writer.status == .writing,
                   pts >= g.startTime else { return }
+            // Never more than `maxAudioLead` past the newest video frame (issue #9). The writer
+            // interleaves audio with video, so audio with no video to go with it (the camera stopped
+            // while the microphone didn't) only piles up in it; in a UI test, appends then blocked
+            // this queue, and with it the main thread's next suspend. Clips end at a video frame anyway.
+            guard g.lastVideoPTS.isValid, (pts - g.lastVideoPTS).seconds <= Self.maxAudioLead else { return }
             guard waitUntilReady(input, writer: g.writer) else { return }
             if !input.append(sampleBuffer) { writerFailed(g, at: pts) }
         }
@@ -515,11 +542,11 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     }
 
     /// Interruption while a save is pending: hand over whatever was already captured.
-    private func resolveEarly(_ p: PendingSave) {
+    private func resolveEarly(_ p: PendingSave, ifEmpty error: RecorderError = .nothingBuffered) {
         if pending === p { pending = nil }
         if p.segments.isEmpty {
             p.bundle.discard()
-            p.ticket.fulfill(.failure(RecorderError.nothingBuffered))
+            p.ticket.fulfill(.failure(error))
         } else {
             p.ticket.fulfill(.success(p.bundle))
         }

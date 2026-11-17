@@ -161,6 +161,10 @@ private struct Banners: View {
             if let notice = model.startFailureNotice {
                 NoticeBanner(notice: notice)
             }
+            // Video stopped and the camera was restarted on its own (frame watchdog, issue #9).
+            if let notice = model.stallNotice {
+                NoticeBanner(notice: notice)
+            }
             if let error = model.status.lastError {
                 Banner(icon: "exclamationmark.circle", text: error, tint: .red)
             }

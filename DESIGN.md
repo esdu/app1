@@ -266,7 +266,8 @@ On interruption (call, another app takes the camera, backgrounding, runtime erro
 
 * the writer is cancelled, and a partial segment is never emitted, so no corrupt data can reach a clip;
 * a pending save resolves right away with the segments already linked, or fails with
-  "nothing buffered" if there are none;
+  "nothing buffered" if there are none (when video stops without any interruption, the frame watchdog
+  settles it the same way, see "Frame watchdog");
 * the ring directory is deleted and the buffer shows 0 s until frames arrive again.
 
 The trade-off: a quality change (user or thermal) clears the buffer. That is simple and always
@@ -347,17 +348,17 @@ timer and attempt checks the recovery id and `automaticCaptureAllowed`, so a sto
 start or ordinary interruption (which iOS ends itself) supersedes it without a race. When the
 budget is spent the model wakes the screen from Dim, plays the failure haptic and calls
 `startFailed(.restartFailed(...))`: capture stops, the idle timer is re-enabled and the phase is
-`.failed("The camera stopped (…) and couldn't be restarted.")` with Try Again. Callers today: a
-runtime-error event (`.runtimeError`) and the safety net (`.sourceStopped`). The frame watchdog (#9)
-should add its own reason here, with its restart action in `restartSource(for:)` (a stalled source
-still "runs", so it needs a full tearDown + bringUp), rather than a second restart path.
+`.failed("The camera stopped (…) and couldn't be restarted.")` with Try Again. Callers: a
+runtime-error event (`.runtimeError`), the safety net (`.sourceStopped`) and the frame watchdog
+(`.stalled`, next section), whose restart action in `restartSource(for:)` is a full stop and start
+(a stalled source still "runs"), not a second restart path.
 
 **Safety net: `AppModel.reconcileCapture()`**, run by `statusTick()` every 0.5 s (the status loop,
 also on `environment.scheduler`). It compares `FrameSource.runState` (`.running`, `.interrupted`,
 `.stopped`; for the camera, `isRunning`/`isInterrupted`) with phase and recorder:
 running but the recorder suspended or the phase paused → resume; interrupted while recording → pause;
 stopped while recording or paused, with no recovery running → `recoverCapture(.sourceStopped)`. It
-does nothing while pipeline work runs or capture isn't wanted. #9 adds its watchdog to `statusTick()`.
+does nothing while pipeline work runs or capture isn't wanted. The frame watchdog runs right after it.
 
 **For explicit user pause (#15):** every automatic path (event application, `recoverCapture`,
 recovery timers and attempts, the safety net) checks `automaticCaptureAllowed`, today `wantsRunning`.
@@ -367,6 +368,77 @@ A user pause belongs in that property, not in a second event stream or restart p
 session keeps running; (b): it stops), `setResumeFailures(n)` (the next n restarts fail),
 `setRunStateSilently(_:)` (a missed notification), `resumeCount`. Not covered by CI: whether a real
 `AVCaptureSession` after a runtime error or a media-services reset behaves as modelled (README checklist).
+
+### Frame watchdog (issue #9)
+
+Nothing else notices if frames simply stop: the session still "runs", the phase stays `.recording`,
+and the ring holds footage that gets older every second (a stalled capture output after a
+media-services reset, a writer that is never ready and drops every frame, a writer that keeps failing
+and restarting). `FrameWatchdog` (pure value, `RewindCam/Model/FrameWatchdog.swift`) is fed the
+recorder's `RecorderStatus` on every status tick by `AppModel.checkFrameWatchdog()`, which runs in
+`statusTick()` after the safety net:
+
+* **Signals.** Progress is `latestMediaTime` (PTS of the newest *video* frame appended to the writer;
+  audio never touches it, so a microphone that keeps delivering can't mask a dead camera) and
+  `lastSegmentEnd`. **`.noVideo`**: no new video frame for `FrameWatchdog.timeout` = **5 s**.
+  **`.noSegments`**: video kept arriving for 5 s after the last new segment (when the camera itself
+  stops, segments stop a moment before frames do, and that is `.noVideo`). 5 s because frames normally
+  come every 17–33 ms and segments every second (a new writer's first one after 1–2 s); it is far
+  outside any normal gap, the check runs every 0.5 s (detection 5–5.5 s after the last frame), and it
+  keeps the time the app shows "REC" over a frozen buffer short next to the shortest buffer (15 s).
+* **Time** is `AppEnvironment.monotonicClock` (`MonotonicClock`): live, `HostMonotonicClock`, the Core
+  Media host clock (`CMClockGetHostTimeClock`, the clock capture timestamps use, already read by
+  `HostMediaClock`), so a wall-clock change can't fake or hide a stall. It is not one of Apple's
+  "system boot time" required-reason APIs (`ProcessInfo.systemUptime`, `mach_absolute_time()`), so the
+  privacy manifest is unchanged. In tests the harness's `FakeDelayScheduler` is the clock, so the
+  status loop and the time it measures advance together and no test sleeps.
+* **Generations.** Every writer has a generation number. A newer generation with a frame is progress; a
+  snapshot from an older generation than one already seen is stale and ignored, as is every generation
+  the recorder held before the watchdog was armed on an empty recorder (after a suspend), so nothing
+  from before a restart counts as new video.
+* **No false positives.** It is armed only while capture is wanted (`automaticCaptureAllowed`), the
+  phase is `.recording`, the source runs, the recorder isn't suspended, and no recovery or pipeline
+  work is pending; any tick where that isn't so disarms it, and so do `bringUp`, `tearDown`,
+  `startFailed`, `applySourceState` (pause or resume), `recoverCapture` and `applyQuality` (settings
+  and thermal changes), because a whole restart can finish between two ticks. The first tick after
+  re-arms it with the recorder's current state as baseline, so every start, restart, interruption or
+  reconfiguration gets the full 5 s (a new generation legitimately has no frame for a moment).
+* **On a stall** the model first settles a save that is waiting for its post-roll
+  (`RollingRecorder.settlePendingSave()`): the post-roll will never arrive, so the save gets the
+  segments already linked (the toast says the clip "ends early"), or, if none, fails with
+  `RecorderError.videoStopped` ("…Save again once RewindCam shows REC"). A ticket is fulfilled at most
+  once, so a later suspend can't settle it again. Then `recoverCapture(.stalled(kind))`: recorder
+  suspended, phase `.paused("No new video for 5 s. Restarting the camera…")`, and
+  `restartSource(for:)` stops and starts the source with the current configuration (keeping the
+  recovery and the phase; a failed start backs off like any other attempt). While a stall recovery is
+  pending, neither a stale "running again" event nor the safety net's "running but paused" case ends
+  it: a stalled source reports `.running` all along, so only its restart counts.
+* **Bounded.** One automatic restart per stall episode (`automaticRestartsPerStall`). If the restarted
+  source stalls again before 30 s of stall-free recording (`recoveredAfter`) end the episode,
+  `recoverCapture` starts the recovery with a spent budget (`RestartBackoff.spent`), so it gives up at
+  once through the same path as #4: screen woken from Dim, failure haptic, `startFailed(.restartFailed)`
+  → "Not recording — The camera stopped (no new video arrived for 5 s) and couldn't be restarted." with
+  Try Again. A user start (launch, foreground, Try Again) begins a new episode. A camera that delivers
+  a few frames after each restart and stops again therefore can't make the app restart forever.
+* **Audio without video.** The recorder drops audio more than `RollingRecorder.maxAudioLead` (1 s)
+  past the newest video frame. The writer interleaves audio with video, so when the camera stops and
+  the microphone doesn't, audio can only pile up in it. The UI test caught the consequence: appends
+  blocked the recorder queue, so the watchdog's own `suspend()` froze the main thread at the moment
+  of the stall. Capture delivers both on one clock within a few hundred ms, so normal audio is untouched.
+* **Telling the user.** After a restart that works, `AppModel.stallNotice` (orange `AppNotice`, no
+  action) says that video had stopped, when the camera was restarted, and that the footage from before
+  is gone; it clears once the buffer is full again, or when capture stops or restarts from the user.
+  The successful restart doesn't wake the screen (unattended use); giving up does.
+* **User pause (#15).** The watchdog only runs while `automaticCaptureAllowed`, and its recovery goes
+  through `recoverCapture`, whose timers and attempts check it too, so an explicit pause there stops
+  the watchdog and any stall recovery without further changes.
+
+`SyntheticFrameSource.withholdVideo(_:)` simulates the stall: frames keep their place on the timeline
+but never reach the sink, audio still does, and `runState` stays `.running`. Tests:
+`FrameWatchdogTests.swift` (policy, settling a pending save in the recorder, and the model: one restart
+then Try Again, recovery and the notice, audio not masking, post-roll settling once, and no stall
+across launch, settings and thermal restarts, background and interruptions). Not covered by CI:
+whether a real `AVCaptureSession` stalls like this and whether a stop and start cures it.
 
 ### Bounded disk
 
