@@ -314,6 +314,14 @@ final class RewindCamUITests: XCTestCase {
         app.swipeUp()
         screenshot(app, "settings-3b-lower-sections")
 
+        // Issue #12: the last row of Settings says RewindCam is not a baby monitor.
+        let supervision = element(app, "supervisionNote")
+        for _ in 0..<4 where !supervision.exists { app.swipeUp() }
+        XCTAssertTrue(supervision.waitForExistence(timeout: 5), "no supervision note at the end of Settings")
+        XCTAssertTrue(supervision.label.contains("not a baby monitor"), "supervision note says: \(supervision.label)")
+        Thread.sleep(forTimeInterval: 1) // let the scroll come to rest for the screenshot
+        screenshot(app, "settings-3c-supervision-note")
+
         app.buttons["doneButton"].tap()
         let label = element(app, "bufferLabel")
         let is60 = NSPredicate(format: "label == %@", "Buffer length 60 seconds")
