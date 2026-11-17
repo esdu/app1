@@ -65,7 +65,7 @@ source, because the Simulator has no camera.*
   free and where, or to choose a shorter buffer or lower quality (lowering either in Settings starts
   recording once it fits). If space runs low while recording it stops cleanly, before writes fail;
   when only a save might not fit it keeps recording and warns. A save is never refused for space, only
-  warned about. Settings shows free space and marks buffer lengths that don't fit. Clips waiting for
+  warned about; it then takes what fits and says if it came out shorter. Settings shows free space and marks buffer lengths that don't fit. Clips waiting for
   Photos are never deleted to make room; the warnings say how much they take.
 - **Orphan cleanup**: leftover buffer files and half-written exports from a crash or kill are removed
   on launch. Finished clips that didn't reach Photos are kept.
@@ -116,6 +116,16 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
   "available for important usage" figure includes purgeable space, so it can be higher than
   Settings › General › iPhone Storage shows. Tested with a fake free-space value only; real full-phone
   behaviour is not verified on a device yet.
+- **Temporary video is bounded, saves can come out shorter.** Besides the buffer, a save needs room
+  for its copy of the footage and the export (at most about 190 MB at the defaults, 4.1 GB at 4K60 with
+  a 120 s buffer and +30 s; Settings shows the current use). A save takes what fits above a 64 MB reserve
+  while recording: with too little room it keeps the newest part and says "It's shorter than asked", or
+  saves nothing and says how much to free. Clips waiting for Photos are never deleted to make room.
+- **If video arrives faster than it can be stored** (more than about 8 s of writes behind, or a disk
+  write fails), recording stops with "Not recording" and **Try Again** instead of using more memory or
+  leaving a gap; a save in progress keeps what was recorded before. These bounds are tested with
+  simulated slow and full storage only; real peak memory and storage at 4K60 are not measured on a
+  device yet.
 - The voice trigger is English (en-US) and needs a device that supports on-device recognition.
 - **A pause lasts until Resume or until RewindCam is relaunched**: it isn't saved, so a relaunch (also
   after iOS ends the app in the background) records again, as before. While paused the camera session
@@ -227,6 +237,13 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       "Camera access is off" flash. Right after a launch, tap Pause while the badge still says STARTING:
       it stays paused with no camera indicator. Tap **Resume**: REC returns and Save works. Force-quit
       while paused and relaunch: it records (the pause isn't kept).
+- [ ] **Working set at the highest setting**: at 4K60, 120 s buffer, +30 s post-roll, record 3 min and
+      save twice in a row (the second after the first finishes). Watch Settings › "Temporary video": it
+      stays under its "at most" figure, and returns to about the buffer size after each save. With Xcode's
+      memory gauge attached, memory stays flat during saves (no growth by tens of MB per second). Then
+      repeat on a nearly full phone (under 1 GB free): the save either succeeds, comes out shorter with
+      "It's shorter than asked", or says how much to free; recording never fails with a write error and
+      clips waiting for Photos are still there.
 - [ ] **Lock during save**: with +10 s post-roll, tap Save and lock the phone at once. After 30 s,
       unlock: the clip is in Photos (or, if not, offered for Retry), never silently gone.
 - [ ] **Locked export (file protection)**: at 4K60 with a 120 s buffer and +30 s post-roll, record

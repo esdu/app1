@@ -96,7 +96,10 @@ final class AppModel {
     /// capture isn't running.
     private(set) var diskSpace: DiskSpaceCheck?
     /// Free space as last read (start, periodic check, save, Settings sheet); nil if unknown or not read.
+    /// Net of what a running save has reserved but not written yet (issue #14, `TemporarySpace`).
     private(set) var availableDiskBytes: Int64?
+    /// RewindCam's media on disk as last measured (issue #14; the Settings sheet measures it when it opens).
+    private(set) var workingSet = MediaWorkingSet()
 
     /// A frame stall that an automatic restart recovered from: what stalled and when it restarted.
     struct RecoveredStall: Equatable {
@@ -116,6 +119,8 @@ final class AppModel {
 
     let environment: AppEnvironment
     let recorder: RollingRecorder
+    /// Free space net of reservations by running saves (issue #14). Every free-space read goes through it.
+    let temporarySpace: TemporarySpace
     @ObservationIgnored private var pipelineTask: Task<Void, Never>?
     /// Pipeline work queued or running. While non-zero the pipeline owns phase and recorder: source
     /// events are recorded, and applied when the last piece of work finishes (`schedulePipeline`).
@@ -161,13 +166,16 @@ final class AppModel {
         activePreset = effective
         thermalMessage = QualityGovernor.message(user: loaded.preset, effective: effective, thermal: thermal)
         supportedResolutions = environment.source.supportedResolutions(for: loaded.camera)
+        let space = TemporarySpace(capacity: environment.diskCapacity)
+        temporarySpace = space
         recorder = RollingRecorder(
             bufferDirectory: environment.storage.bufferDirectory,
             clipsDirectory: environment.storage.clipsDirectory,
             // No audio until a started source says it delivers some (`bringUp`).
             configuration: RollingRecorder.Configuration(bufferSeconds: loaded.bufferSeconds, preset: effective,
                                                          audioEnabled: false,
-                                                         realTime: environment.realTime))
+                                                         realTime: environment.realTime),
+            space: space)
 
         fanOut = SampleFanOut(primary: recorder)
         // Source events arrive on any thread. They go through one AsyncStream, consumed by one
@@ -280,9 +288,19 @@ final class AppModel {
         RecordingSettings.bufferChoices.filter { diskSpaceCheck(bufferSeconds: $0).level == .tooLow }
     }
 
-    /// Reads free space now (the Settings sheet calls this when it opens).
+    /// Reads free space now and measures the working set (the Settings sheet calls this when it opens).
     func refreshDiskSpace() {
-        availableDiskBytes = environment.diskCapacity.availableBytes()
+        availableDiskBytes = temporarySpace.unreservedBytes()
+        workingSet = environment.storage.measureWorkingSet()
+    }
+
+    /// The most RewindCam's temporary media can take at the current settings (issue #14): ring + one
+    /// save's job folder + its export output. Kept clips come on top (`unsavedClipBytes`).
+    var temporaryMediaCapBytes: Int64 {
+        BufferMath.temporaryMediaCapBytes(
+            RollingRecorder.Configuration(bufferSeconds: settings.bufferSeconds, preset: activePreset,
+                                          audioEnabled: settings.audioEnabled),
+            postRollSeconds: Double(settings.postRollSeconds))
     }
 
     static let photosDeniedHint = "Photos access is off. Saved clips stay in RewindCam until you allow it "
@@ -629,8 +647,9 @@ final class AppModel {
             showToast("Can't save. \(reason)", isError: true)
             return nil
         }
-        // Issue #10: low free space never refuses a save (a shorter clip beats none); it warns.
-        let available = environment.diskCapacity.availableBytes()
+        // Issue #10: low free space never refuses a save (a shorter clip beats none); it warns. Issue #14
+        // then sizes the export from the files themselves (`exportDurably`).
+        let available = temporarySpace.unreservedBytes()
         availableDiskBytes = available
         let lowSpace = diskPolicy.beforeSave(availableBytes: available).level == .saveMayNotFit
         let postRoll = Double(settings.postRollSeconds)
@@ -692,8 +711,18 @@ final class AppModel {
         }
     }
 
+    /// Why a saved clip is shorter than asked (issue #14).
+    static func shortenedSentence(_ limit: SaveLimit) -> String {
+        switch limit {
+        case .freeSpace:
+            "It's shorter than asked: there wasn't enough free space for all of it (\(storageHint))."
+        case .workingSetCap:
+            "It's shorter than asked: the video took more space than RewindCam allows a save."
+        }
+    }
+
     private func exportAndAddToPhotos(_ ticket: SaveTicket, lowSpace: Bool) async {
-        let exported: (clip: UnsavedClip, duration: Double, endedEarly: Bool)
+        let exported: (clip: UnsavedClip, duration: Double, endedEarly: Bool, limit: SaveLimit?)
         do {
             exported = try await exportDurably(ticket)
         } catch {
@@ -701,7 +730,10 @@ final class AppModel {
             // `RecorderError.videoStopped` says to save again once recording is back.
             environment.haptics.failure()
             var message = error.localizedDescription
-            if lowSpace { message += " Storage is low: free up space (\(Self.storageHint)), then save again." }
+            // A `StorageSpaceError` already says how much to free and where.
+            if lowSpace, !(error is StorageSpaceError) {
+                message += " Storage is low: free up space (\(Self.storageHint)), then save again."
+            }
             showToast(message, isError: true)
             return
         }
@@ -717,10 +749,17 @@ final class AppModel {
             lastPhotosError = nil
             environment.haptics.success()
             let seconds = Int(exported.duration.rounded())
+            var message = "Saved \(seconds) s clip to Photos"
             // Recording stopped (interruption, or video stopped arriving, #9) before the clip's end.
-            showToast(exported.endedEarly
-                ? "Saved \(seconds) s clip to Photos. It ends early: recording stopped before the end you asked for."
-                : "Saved \(seconds) s clip to Photos")
+            if exported.endedEarly {
+                message += ". It ends early: recording stopped before the end you asked for."
+            }
+            // Cut to what fits (issue #14): says so, never silently shorter.
+            if let limit = exported.limit {
+                message += exported.endedEarly ? " " : ". "
+                message += Self.shortenedSentence(limit)
+            }
+            showToast(message)
         } catch {
             photosFailed(error)
         }
@@ -728,18 +767,39 @@ final class AppModel {
 
     /// Waits for the segments, exports to `<name>.partial.mov` in the unsaved-clips folder and renames
     /// it to `.mov` only once the export is complete. The job folder in Caches is always discarded.
+    ///
+    /// Issue #14: before anything is written, the export's peak (concatenated source + output, from the
+    /// bundle's actual file sizes) is reserved in `temporarySpace` above `saveFloorBytes`. If only part
+    /// fits, the newest part is exported (the clip still ends where asked, `SaveLimit.freeSpace`); if not
+    /// even the newest second fits, nothing is written and the error says how much to free.
     private func exportDurably(_ ticket: SaveTicket) async throws
-        -> (clip: UnsavedClip, duration: Double, endedEarly: Bool) {
+        -> (clip: UnsavedClip, duration: Double, endedEarly: Bool, limit: SaveLimit?) {
         let storage = environment.storage
-        let bundle = try await ticket.bundle()
+        var bundle = try await ticket.bundle()
         defer { bundle.discard() }
+        let floor = saveFloorBytes
+        switch DiskSpacePolicy.exportAdmission(initBytes: bundle.initBytes, segmentBytes: bundle.segments.map(\.bytes),
+                                               availableBytes: temporarySpace.unreservedBytes(), floorBytes: floor) {
+        case .all: break
+        case .newest(let count): bundle = bundle.keepingNewest(count)
+        case .none(let bytesToFree): throw StorageSpaceError.noRoomToExport(bytesToFree: bytesToFree)
+        }
+        let source = bundle.sourceBytes
+        let peak = BufferMath.exportPeakBytes(sourceBytes: source)
+        guard let reservation = temporarySpace.reserve(peak, floor: floor) else {
+            // Something else took the space since the admission above.
+            let room = (temporarySpace.unreservedBytes() ?? 0) - floor
+            throw StorageSpaceError.noRoomToExport(bytesToFree: max(1, peak - room))
+        }
+        defer { reservation.release() }
         let partial = try storage.partialClipURL(baseName: ClipExporter.defaultBaseName())
         do {
-            let output = try await ClipExporter.export(bundle, to: partial)
+            let output = try await ClipExporter.export(bundle, to: partial,
+                                                       outputByteLimit: BufferMath.exportOutputBytes(sourceBytes: source))
             let clip = try storage.commitPartialClip(output.url)
             // Settled early (`RollingRecorder.resolveEarly` / `settlePendingSave`): footage stops short.
             let endedEarly = bundle.clipEnd < bundle.requestedEnd - 0.5
-            return (clip, output.duration, endedEarly)
+            return (clip, output.duration, endedEarly, bundle.limit)
         } catch {
             try? FileManager.default.removeItem(at: partial)
             throw error
@@ -751,10 +811,18 @@ final class AppModel {
     private func addToPhotos(_ clip: UnsavedClip) async throws {
         let storage = environment.storage
         let library = environment.photoLibrary
-        let staged = try storage.stageForPhotos(clip)
+        // A staging copy (only if hard links fail) is admitted like any temporary media (issue #14).
+        let staged = try storage.stageForPhotos(clip, space: temporarySpace, floor: saveFloorBytes)
         defer { storage.discardStaging(staged) }
         try await library.saveVideo(at: staged)
         storage.removeUnsavedClip(clip)
+    }
+
+    /// What a save's temporary files must leave free right now (issue #14): the reserve while the
+    /// recorder writes, nothing more once capture has stopped.
+    private var saveFloorBytes: Int64 {
+        let status = recorder.status()
+        return DiskSpacePolicy.saveFloorBytes(captureRunning: !status.isSuspended && status.halt == nil)
     }
 
     private func photosFailed(_ error: Error) {
@@ -1196,10 +1264,11 @@ final class AppModel {
         checkDiskSpace()
     }
 
-    /// Reads free space through `environment.diskCapacity`; the periodic check's interval restarts.
+    /// Reads free space through `environment.diskCapacity`, net of what a running save has reserved
+    /// (issue #14, `TemporarySpace`); the periodic check's interval restarts.
     private func readDiskSpace() -> Int64? {
         lastDiskCheck = environment.monotonicClock.seconds
-        let available = environment.diskCapacity.availableBytes()
+        let available = temporarySpace.unreservedBytes()
         availableDiskBytes = available
         return available
     }
@@ -1209,8 +1278,17 @@ final class AppModel {
     /// only while recording with no pipeline work. Below the reserve, capture stops cleanly
     /// (`stopForLowDisk`) before segment writes can fail; between the reserve and room for buffer + save,
     /// `diskSpaceNotice` warns. Unknown free space counts as enough.
+    ///
+    /// Issue #14: on every tick (not only every 5 s), a recorder that stopped itself (`RecorderHalt`: fragment
+    /// backlog over its bound, or a segment write failed) stops capture here too, before the frame
+    /// watchdog could take the missing frames for a stall and restart into the same shortage.
     private func checkDiskSpace() {
         guard automaticCaptureAllowed, phase == .recording, pipelineDepth == 0 else { return }
+        if let halt = recorder.status().halt {
+            let check = diskPolicy.whileRecording(availableBytes: readDiskSpace(), ringBytes: 0)
+            schedulePipeline { model in await model.stopForRecorderHalt(halt, check: check) }
+            return
+        }
         if let last = lastDiskCheck,
            environment.monotonicClock.seconds - last < DiskSpacePolicy.checkInterval - 1e-6 { return }
         let available = readDiskSpace()
@@ -1228,6 +1306,19 @@ final class AppModel {
     /// why. Capture stays stopped until Try Again, the foreground re-check or a settings change finds
     /// room. Finished clips in `UnsavedClips/` are never touched.
     private func stopForLowDisk(_ check: DiskSpaceCheck) async {
+        await stopForResources(.outOfSpace(check))
+    }
+
+    /// The recorder halted (issue #14): if free space is below the reserve, this is #10's out-of-space
+    /// stop; otherwise "Not recording" with the halt's reason and Try Again. Either way nothing restarts
+    /// on its own, so the same shortage can't loop; a pending save was already settled by the recorder.
+    private func stopForRecorderHalt(_ halt: RecorderHalt, check: DiskSpaceCheck) async {
+        await stopForResources(check.level == .tooLow ? .outOfSpace(check) : .failed(halt.message))
+    }
+
+    /// Shared by the resource stops: suspend the recorder (ring deleted, a pending post-roll settled with
+    /// what is there; a running export carries on), stop the camera, wake from Dim, set `phase`.
+    private func stopForResources(_ stoppedPhase: Phase) async {
         guard automaticCaptureAllowed else { return }
         switch phase {
         case .recording, .paused, .starting: break
@@ -1238,7 +1329,7 @@ final class AppModel {
         environment.haptics.failure()
         await stopCapture()
         guard automaticCaptureAllowed else { return } // paused or stopped meanwhile (#15)
-        phase = .outOfSpace(check)
+        phase = stoppedPhase
         refreshStatus()
     }
 

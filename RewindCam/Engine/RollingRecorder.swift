@@ -2,6 +2,14 @@ import AVFoundation
 import CoreMedia
 import UniformTypeIdentifiers
 
+/// Why a save holds less than was asked for, besides recording having stopped (issue #14).
+enum SaveLimit: Equatable, Sendable {
+    /// Copies (hard links failed) or the export didn't fit in the free space above the floor.
+    case freeSpace
+    /// The save's job folder reached `BufferMath.saveBundleCapBytes` (the encoder far over its bitrate).
+    case workingSetCap
+}
+
 /// The pieces of one save request, hard-linked into a private folder so the ring can keep evicting.
 struct SegmentBundle: Sendable {
     let directory: URL
@@ -9,12 +17,71 @@ struct SegmentBundle: Sendable {
     let segments: [BufferedSegment]
     let requestedStart: Double
     let requestedEnd: Double
+    /// Set when the bundle was cut short to stay within free space or the working-set cap.
+    var limit: SaveLimit?
 
     var clipStart: Double { max(requestedStart, segments.first?.start ?? requestedStart) }
     var clipEnd: Double { min(requestedEnd, segments.last?.end ?? requestedEnd) }
     var clipDuration: Double { max(0, clipEnd - clipStart) }
 
+    /// Size of the job folder's `init.mp4` on disk.
+    var initBytes: Int64 { FileBufferStorage.fileSize(initSegment) }
+    /// What concatenating the bundle writes (`source.mp4`): init + segments, from their sizes on disk.
+    var sourceBytes: Int64 { initBytes + segments.reduce(0) { $0 + $1.bytes } }
+
+    /// Only the newest `count` segments (the clip still ends where asked, but starts later); the
+    /// others' links are deleted now. Marked `.freeSpace`.
+    func keepingNewest(_ count: Int) -> SegmentBundle {
+        let dropped = segments.dropLast(max(0, count))
+        for segment in dropped { try? FileManager.default.removeItem(at: segment.url) }
+        return SegmentBundle(directory: directory, initSegment: initSegment, segments: Array(segments.suffix(count)),
+                             requestedStart: requestedStart, requestedEnd: requestedEnd, limit: .freeSpace)
+    }
+
     func discard() { try? FileManager.default.removeItem(at: directory) }
+}
+
+/// Why the recorder stopped itself (issue #14). It ignores samples until `resume()` or `reset()`, so a
+/// shortage can't turn into an automatic restart loop; `AppModel` stops capture and says why.
+enum RecorderHalt: Equatable, Sendable {
+    /// Fragment data arrived faster than it could be written (`FragmentQueueLimit` reached), or one
+    /// fragment was larger than the limit allows.
+    case backlog
+    /// A fragment couldn't be written (usually a full disk).
+    case writeFailed(String)
+
+    var message: String {
+        switch self {
+        case .backlog:
+            "Recording stopped: video arrived faster than it could be stored, so RewindCam stopped instead of "
+                + "using more memory. Tap Try Again; if it happens again, choose a lower quality in Settings."
+        case .writeFailed(let why):
+            "Recording stopped: the buffer couldn't be written (\(why)). Free up space and tap Try Again."
+        }
+    }
+}
+
+/// Fragment data admitted by the writer delegate and not yet written or dropped (issue #14).
+struct FragmentQueueStats: Equatable, Sendable {
+    var limit: FragmentQueueLimit
+    var count = 0
+    var bytes: Int64 = 0
+    var peakCount = 0
+    var peakBytes: Int64 = 0
+    var admitted = 0
+    var rejected = 0
+}
+
+/// The file operations the recorder performs on media, so tests can use slow or failing storage.
+struct MediaFileOperations: Sendable {
+    /// Hard-links `$0` to `$1`.
+    var link: @Sendable (URL, URL) throws -> Void
+    /// Writes one fragment's bytes to a new file.
+    var writeFragment: @Sendable (Data, URL) throws -> Void
+
+    static let live = MediaFileOperations(
+        link: { try FileManager.default.linkItem(at: $0, to: $1) },
+        writeFragment: { try $0.write(to: $1) })
 }
 
 enum RecorderError: LocalizedError, Equatable {
@@ -46,6 +113,8 @@ struct RecorderStatus: Equatable, Sendable {
     var isSaving = false
     var isSuspended = false
     var lastError: String?
+    /// Set when the recorder stopped itself (issue #14); cleared by `resume()` or `reset()`.
+    var halt: RecorderHalt?
 }
 
 /// Result handle for a save request: registered synchronously, awaited later.
@@ -160,27 +229,47 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         let end: Double
         let directory: URL
         let initSegment: URL
+        /// `BufferMath.saveBundleCapBytes`: the job folder never holds more (issue #14).
+        let byteCap: Int64
         var segments: [BufferedSegment] = []
+        /// init + segments in the job folder.
+        var bytes: Int64
+        var limit: SaveLimit?
 
-        init(ticket: SaveTicket, generationID: Int, start: Double, end: Double, directory: URL, initSegment: URL) {
+        init(ticket: SaveTicket, generationID: Int, start: Double, end: Double, directory: URL, initSegment: URL,
+             byteCap: Int64) {
             self.ticket = ticket
             self.generationID = generationID
             self.start = start
             self.end = end
             self.directory = directory
             self.initSegment = initSegment
+            self.byteCap = byteCap
+            bytes = FileBufferStorage.fileSize(initSegment)
         }
 
-        func link(_ segment: BufferedSegment) throws {
+        /// Links (or, if linking fails and the space is granted, copies) one segment into the job folder.
+        /// Throws `SaveLimit` when the segment would take the folder past its cap or the copy has no room.
+        func link(_ segment: BufferedSegment, using recorder: RollingRecorder) throws {
+            guard bytes + segment.bytes <= byteCap else { throw SaveLimitReached(limit: .workingSetCap) }
             let dest = directory.appendingPathComponent(segment.url.lastPathComponent)
-            try RollingRecorder.linkOrCopy(segment.url, to: dest)
+            do {
+                try recorder.linkOrCopyForSave(segment.url, to: dest)
+            } catch is StorageSpaceError {
+                throw SaveLimitReached(limit: .freeSpace)
+            }
             segments.append(segment.relocated(to: dest))
+            bytes += segment.bytes
         }
 
         var bundle: SegmentBundle {
             SegmentBundle(directory: directory, initSegment: initSegment, segments: segments,
-                          requestedStart: start, requestedEnd: end)
+                          requestedStart: start, requestedEnd: end, limit: limit)
         }
+    }
+
+    private struct SaveLimitReached: Error {
+        let limit: SaveLimit
     }
 
     let bufferDirectory: URL
@@ -191,14 +280,32 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     private var generationCounter = 0
     private var pending: PendingSave?
     private var suspended = false
+    /// Set when the recorder stopped itself (issue #14); samples are ignored until `resume()`/`reset()`.
+    private var halt: RecorderHalt?
     private var lastError: String?
     private var retryAfter: CMTime = .invalid
     private let statusBox = Locked(RecorderStatus())
+    private let fileOperations: MediaFileOperations
+    /// Free space for copies when hard links fail (issue #14); nil: unknown, copies always allowed.
+    private let space: TemporarySpace?
 
-    init(bufferDirectory: URL, clipsDirectory: URL, configuration: Configuration) {
+    /// Fragment admission (issue #14), shared by the writer's delegate thread and `queue`.
+    private struct Admission {
+        var stats: FragmentQueueStats
+        /// Writers whose fragment was refused: everything later from them is refused too, until the
+        /// recorder queue has stopped their generation (`fragmentRejected`).
+        var refusedWriters: Set<ObjectIdentifier> = []
+    }
+    private let admission: Locked<Admission>
+
+    init(bufferDirectory: URL, clipsDirectory: URL, configuration: Configuration,
+         space: TemporarySpace? = nil, fileOperations: MediaFileOperations = .live) {
         self.bufferDirectory = bufferDirectory
         self.clipsDirectory = clipsDirectory
         self.configuration = configuration
+        self.space = space
+        self.fileOperations = fileOperations
+        admission = Locked(Admission(stats: FragmentQueueStats(limit: BufferMath.fragmentQueueLimit(configuration))))
         super.init()
     }
 
@@ -214,6 +321,13 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
 
     /// Lock-protected snapshot; safe to call from the main thread at any rate.
     func status() -> RecorderStatus { statusBox.current }
+
+    /// Fragment data waiting for the recorder queue right now, its peaks and the bound (issue #14).
+    func fragmentQueue() -> FragmentQueueStats { admission.current.stats }
+
+    /// The current generation's writer, if any. Tests feed its delegate callbacks directly
+    /// (bursts, oversized fragments) to exercise fragment admission.
+    var activeWriter: AVAssetWriter? { queue.sync { generation?.writer } }
 
     /// Status plus the segment files actually on disk, read together on the recorder queue
     /// (segments land asynchronously, so separate reads can disagree by one segment).
@@ -242,18 +356,21 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         }
     }
 
+    /// Takes samples again; also ends a halt (issue #14).
     func resume() {
         queue.sync {
             suspended = false
+            halt = nil
             retryAfter = .invalid
             publish()
         }
     }
 
-    /// Drops the current buffer; the next video frame starts a fresh generation.
+    /// Drops the current buffer and ends a halt; the next video frame starts a fresh generation.
     func reset() {
         queue.sync {
             tearDownGeneration()
+            halt = nil
             publish()
         }
     }
@@ -263,6 +380,7 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         queue.sync {
             let restart = new.needsNewWriter(comparedTo: configuration)
             configuration = new
+            admission.withLock { $0.stats.limit = BufferMath.fragmentQueueLimit(new) }
             if restart {
                 tearDownGeneration()
             } else if let g = generation {
@@ -295,16 +413,34 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
             do {
                 try FileProtectionPolicy.prepareDirectory(dir)
                 let initCopy = dir.appendingPathComponent("init.mp4")
-                try Self.linkOrCopy(initURL, to: initCopy)
+                try linkOrCopyForSave(initURL, to: initCopy)
                 let p = PendingSave(ticket: ticket, generationID: g.id, start: start, end: end,
-                                    directory: dir, initSegment: initCopy)
-                for segment in g.ring.segments where segment.end > start + 1e-6 {
-                    try p.link(segment)
+                                    directory: dir, initSegment: initCopy,
+                                    byteCap: BufferMath.saveBundleCapBytes(configuration, postRollSeconds: postRoll))
+                // Newest first, so a copy that doesn't fit (hard links failed, issue #14) costs the oldest
+                // footage and what is linked stays one contiguous run that ends at the tap.
+                var linked: [BufferedSegment] = []
+                for segment in g.ring.segments.reversed() where segment.end > start + 1e-6 {
+                    do {
+                        try p.link(segment, using: self)
+                    } catch let reached as SaveLimitReached {
+                        p.limit = reached.limit
+                        break
+                    }
+                    linked.append(p.segments.removeLast())
+                }
+                p.segments = linked.reversed()
+                if p.limit != nil, p.segments.isEmpty, !g.ring.segments.isEmpty {
+                    throw StorageSpaceError.noRoomToCopy(bytes: g.ring.segments.last?.bytes ?? 0)
                 }
                 pending = p
+                // A start cut short for space still takes the post-roll: it continues the same run.
                 if let last = p.segments.last, last.end >= end - tolerance {
                     complete(p)
                 }
+            } catch let error as StorageSpaceError {
+                try? FileManager.default.removeItem(at: dir)
+                ticket.fulfill(.failure(error))
             } catch {
                 try? FileManager.default.removeItem(at: dir)
                 ticket.fulfill(.failure(RecorderError.fileError(error.localizedDescription)))
@@ -320,7 +456,7 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     func settlePendingSave() {
         queue.sync {
             guard let p = pending else { return }
-            resolveEarly(p, ifEmpty: .videoStopped)
+            resolveEarly(p, ifEmpty: RecorderError.videoStopped)
             publish()
         }
     }
@@ -336,10 +472,63 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         }
         let isInit = segmentType == .initialization
         let writerRef = UncheckedSendable(writer)
-        // Never block the writer's thread: hop to our queue.
-        queue.async { [self] in
-            handleSegment(from: writerRef.value, data: segmentData, isInit: isInit, timing: timing)
+        let bytes = Int64(segmentData.count)
+        // Never block the writer's thread: hop to our queue. But only retain the data if it fits the
+        // queued-fragment bound (issue #14); a refused fragment is let go here, and its generation is
+        // stopped on the queue rather than continued with a hole in it.
+        switch admit(ObjectIdentifier(writer), bytes: bytes) {
+        case .admitted:
+            queue.async { [self] in
+                defer { releaseAdmission(bytes) }
+                handleSegment(from: writerRef.value, data: segmentData, isInit: isInit, timing: timing)
+            }
+        case .refusedFirst:
+            queue.async { [self] in fragmentRefused(from: writerRef.value) }
+        case .refusedAgain:
+            break // already being stopped
         }
+    }
+
+    // MARK: - Fragment admission (issue #14; thread-safe)
+
+    private enum AdmissionResult { case admitted, refusedFirst, refusedAgain }
+
+    /// Reserves room for one fragment in the queued-fragment bound. Refuses it if it alone is larger than
+    /// `FragmentQueueLimit.fragmentBytes`, if it would exceed the count or byte bound, or if an earlier
+    /// fragment of the same writer was refused (the sequence after that point is not usable).
+    private func admit(_ writer: ObjectIdentifier, bytes: Int64) -> AdmissionResult {
+        admission.withLock { (a: inout Admission) -> AdmissionResult in
+            if a.refusedWriters.contains(writer) {
+                a.stats.rejected += 1
+                return .refusedAgain
+            }
+            let limit = a.stats.limit
+            guard bytes <= limit.fragmentBytes, a.stats.count + 1 <= limit.count,
+                  a.stats.bytes + bytes <= limit.bytes else {
+                a.refusedWriters.insert(writer)
+                a.stats.rejected += 1
+                return .refusedFirst
+            }
+            a.stats.count += 1
+            a.stats.bytes += bytes
+            a.stats.admitted += 1
+            a.stats.peakCount = max(a.stats.peakCount, a.stats.count)
+            a.stats.peakBytes = max(a.stats.peakBytes, a.stats.bytes)
+            return .admitted
+        }
+    }
+
+    /// Every admitted fragment is released exactly once, when its queue block ends: written, dropped as
+    /// stale or refused, or failed.
+    private func releaseAdmission(_ bytes: Int64) {
+        admission.withLock { a in
+            a.stats.count -= 1
+            a.stats.bytes -= bytes
+        }
+    }
+
+    private func isRefused(_ writer: AVAssetWriter) -> Bool {
+        admission.withLock { $0.refusedWriters.contains(ObjectIdentifier(writer)) }
     }
 
     // MARK: - Private (on `queue`)
@@ -352,7 +541,7 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     static let maxAudioLead: Double = 1
 
     private func append(_ sampleBuffer: CMSampleBuffer, kind: MediaKind) {
-        guard !suspended else { return }
+        guard !suspended, halt == nil else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         guard pts.isValid, pts.isNumeric else { return }
 
@@ -493,14 +682,19 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
 
     private func handleSegment(from writer: AVAssetWriter, data: Data, isInit: Bool,
                                timing: (start: Double, duration: Double)?) {
-        guard let g = generation, g.writer === writer else { return } // stale generation
+        // Stale generation: dropped (its reservation is released by the caller), and it can't
+        // recreate the deleted generation folder.
+        guard let g = generation, g.writer === writer else { return }
+        // A later fragment of this writer was refused (issue #14): the generation is being stopped
+        // (`fragmentRefused` is queued behind this), so nothing more of it is kept.
+        guard !isRefused(writer) else { return }
         if isInit {
             let url = g.directory.appendingPathComponent("init.mp4")
             do {
-                try data.write(to: url)
+                try fileOperations.writeFragment(data, url)
                 g.initSegment = url
             } catch {
-                lastError = "Can't write buffer: \(error.localizedDescription)"
+                haltGeneration(.writeFailed(error.localizedDescription))
             }
             return
         }
@@ -509,9 +703,10 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         g.nextSegmentIndex += 1
         let url = g.directory.appendingPathComponent(String(format: "seg-%06d.m4s", index))
         do {
-            try data.write(to: url)
+            try fileOperations.writeFragment(data, url)
         } catch {
-            lastError = "Can't write buffer: \(error.localizedDescription)"
+            // Skipping the segment would leave a hole that a save could span (issue #14): stop instead.
+            haltGeneration(.writeFailed(error.localizedDescription))
             return
         }
 
@@ -521,12 +716,19 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         let duration = timing.map { $0.duration }.flatMap { $0.isFinite && $0 > 0 ? $0 : nil } ?? configuration.segmentInterval
         let segment = BufferedSegment(index: index, url: url, start: start, duration: duration, bytes: Int64(data.count))
         g.lastSegmentEnd = segment.end
-        delete(g.ring.append(segment))
+        // Evicted files are deleted after the pending save has linked this segment: the ring may evict
+        // the newest segment itself if it alone is over the cap (`SegmentRing`).
+        let evicted = g.ring.append(segment)
+        defer { delete(evicted) }
 
         if let p = pending, p.generationID == g.id {
             do {
-                if segment.end > p.start { try p.link(segment) }
+                if segment.end > p.start { try p.link(segment, using: self) }
                 if segment.end >= p.end - tolerance { complete(p) }
+            } catch let reached as SaveLimitReached {
+                // No room for the copy, or the job folder is at its cap: settle with the run so far.
+                p.limit = reached.limit
+                resolveEarly(p, ifEmpty: StorageSpaceError.noRoomToCopy(bytes: segment.bytes))
             } catch {
                 pending = nil
                 p.bundle.discard()
@@ -536,13 +738,31 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         publish()
     }
 
+    /// The first refused fragment of `writer` (issue #14). If it belongs to the current generation, that
+    /// generation stops: a pending save is settled with the contiguous footage it already has, and the
+    /// recorder halts until `resume()`/`reset()`. A stale writer's refusal changes nothing. Either way the
+    /// writer's refusal mark is cleared: everything it sent before is already handled by now.
+    private func fragmentRefused(from writer: AVAssetWriter) {
+        defer { admission.withLock { _ = $0.refusedWriters.remove(ObjectIdentifier(writer)) } }
+        guard let g = generation, g.writer === writer else { return }
+        haltGeneration(.backlog)
+    }
+
+    /// Stops the current generation for a resource problem and ignores samples until `resume()`/`reset()`
+    /// (no automatic restart under the same shortage). The pending save is settled once.
+    private func haltGeneration(_ reason: RecorderHalt) {
+        halt = reason
+        tearDownGeneration()
+        publish()
+    }
+
     private func complete(_ p: PendingSave) {
         if pending === p { pending = nil }
         p.ticket.fulfill(.success(p.bundle))
     }
 
     /// Interruption while a save is pending: hand over whatever was already captured.
-    private func resolveEarly(_ p: PendingSave, ifEmpty error: RecorderError = .nothingBuffered) {
+    private func resolveEarly(_ p: PendingSave, ifEmpty error: Error = RecorderError.nothingBuffered) {
         if pending === p { pending = nil }
         if p.segments.isEmpty {
             p.bundle.discard()
@@ -577,17 +797,37 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
             lastSegmentEnd: g?.lastSegmentEnd,
             isSaving: pending != nil,
             isSuspended: suspended,
-            lastError: lastError
+            lastError: lastError,
+            halt: halt
         )
         statusBox.withLock { $0 = snapshot }
     }
 
-    /// A hard link shares the source's inode, and so its protection class. A copy is a new file and
-    /// gets the media class set explicitly (`FileProtectionPolicy`).
-    static func linkOrCopy(_ src: URL, to dest: URL) throws {
+    /// A save's link (or copy) of a ring file, on `queue`: copies are admitted against `space` above the
+    /// reserve (capture is running), issue #14.
+    fileprivate func linkOrCopyForSave(_ src: URL, to dest: URL) throws {
+        try Self.linkOrCopy(src, to: dest, link: fileOperations.link, space: space,
+                            floor: DiskSpacePolicy.saveFloorBytes(captureRunning: true))
+    }
+
+    /// A hard link shares the source's inode, and so its protection class, and costs no space. A copy is
+    /// a new file: it gets the media class set explicitly (`FileProtectionPolicy`), and (issue #14) is
+    /// made only if `space` grants its size above `floor`, else `StorageSpaceError.noRoomToCopy`.
+    static func linkOrCopy(_ src: URL, to dest: URL,
+                           link: @Sendable (URL, URL) throws -> Void = MediaFileOperations.live.link,
+                           space: TemporarySpace? = nil, floor: Int64 = 0) throws {
         do {
-            try FileManager.default.linkItem(at: src, to: dest)
+            try link(src, dest)
         } catch {
+            let bytes = FileBufferStorage.fileSize(src)
+            var reservation: SpaceReservation?
+            if let space {
+                guard let granted = space.reserve(bytes, floor: floor) else {
+                    throw StorageSpaceError.noRoomToCopy(bytes: bytes)
+                }
+                reservation = granted
+            }
+            defer { reservation?.release() }
             try FileProtectionPolicy.copyItem(at: src, to: dest)
         }
     }

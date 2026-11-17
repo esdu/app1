@@ -89,12 +89,14 @@ extension BufferStorage {
     /// so `PhotoLibrary.saveVideo` may move or consume the file without touching the kept copy.
     /// The link is the same inode as the kept clip, so it has the same protection class; a copy gets
     /// the media class set explicitly (`RollingRecorder.linkOrCopy`).
-    func stageForPhotos(_ clip: UnsavedClip) throws -> URL {
+    /// A copy (issue #14) is made only if `space` grants its size above `floor`; otherwise this throws
+    /// `StorageSpaceError.noRoomToCopy` and the kept clip stays for Retry.
+    func stageForPhotos(_ clip: UnsavedClip, space: TemporarySpace? = nil, floor: Int64 = 0) throws -> URL {
         let dir = clipsDirectory.appendingPathComponent("photos-\(UUID().uuidString)", isDirectory: true)
         try FileProtectionPolicy.prepareDirectory(dir)
         let staged = dir.appendingPathComponent(clip.name)
         do {
-            try RollingRecorder.linkOrCopy(clip.url, to: staged)
+            try RollingRecorder.linkOrCopy(clip.url, to: staged, space: space, floor: floor)
         } catch {
             try? FileManager.default.removeItem(at: dir)
             throw error
@@ -115,6 +117,74 @@ extension BufferStorage {
     static func fileSize(_ url: URL) -> Int64 {
         Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
     }
+}
+
+// MARK: - Working set (issue #14)
+
+/// What RewindCam's media files take on disk right now, measured by enumerating the folders (not
+/// estimated). Each physical file counts once: a hard link shares its data with the file it links
+/// (same device and inode), so a save's links to ring segments, and a Photos staging link to a kept
+/// clip, add nothing; copies, `source.mp4` and exports do. See DESIGN.md §2, "Bounded disk".
+struct MediaWorkingSet: Equatable, Sendable {
+    /// `RewindBuffer/`: the ring (every generation folder).
+    var ringBytes: Int64 = 0
+    /// `RewindClips/save-*`: what save jobs hold besides ring files: links to segments the ring has
+    /// evicted since (post-roll), copies where linking failed, and the concatenated `source.mp4`.
+    var saveJobBytes: Int64 = 0
+    /// `UnsavedClips/*.partial.mov`: exports being written.
+    var exportBytes: Int64 = 0
+    /// `RewindClips/photos-*`: Photos staging copies (a staging link to a kept clip is 0).
+    var stagingBytes: Int64 = 0
+    /// `UnsavedClips/*.mov`: finished clips waiting for Photos. Durable, not temporary: reported
+    /// separately and never deleted to make room.
+    var keptClipBytes: Int64 = 0
+
+    /// Everything temporary: what `BufferMath.temporaryMediaCapBytes` bounds.
+    var temporaryBytes: Int64 { ringBytes + saveJobBytes + exportBytes + stagingBytes }
+}
+
+extension BufferStorage {
+    /// Measures `MediaWorkingSet` from the files on disk. Kept clips are visited first, then the ring,
+    /// so a link is attributed to the file it shares data with.
+    func measureWorkingSet() -> MediaWorkingSet {
+        var seen = Set<FileIdentity>()
+        var set = MediaWorkingSet()
+        func add(_ url: URL, to keyPath: WritableKeyPath<MediaWorkingSet, Int64>) {
+            guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  attributes[.type] as? FileAttributeType == .typeRegular else { return }
+            let size = (attributes[.size] as? NSNumber)?.int64Value ?? 0
+            if let inode = (attributes[.systemFileNumber] as? NSNumber)?.uint64Value,
+               let device = (attributes[.systemNumber] as? NSNumber)?.uint64Value {
+                guard seen.insert(FileIdentity(device: device, inode: inode)).inserted else { return }
+            }
+            set[keyPath: keyPath] += size
+        }
+        let durable = Self.allItems(in: unsavedDirectory)
+        for url in durable where UnsavedClipFiles.isFinished(url) { add(url, to: \.keptClipBytes) }
+        for url in Self.allItems(in: bufferDirectory) { add(url, to: \.ringBytes) }
+        // `RewindClips/` holds one folder per save job (`save-*`) or Photos staging (`photos-*`).
+        let folders = (try? FileManager.default.contentsOfDirectory(at: clipsDirectory, includingPropertiesForKeys: nil)) ?? []
+        let staging = folders.filter { $0.lastPathComponent.hasPrefix("photos-") }
+        for folder in folders where !staging.contains(folder) {
+            for url in [folder] + Self.allItems(in: folder) { add(url, to: \.saveJobBytes) }
+        }
+        for url in durable where UnsavedClipFiles.isPartial(url) { add(url, to: \.exportBytes) }
+        for folder in staging {
+            for url in Self.allItems(in: folder) { add(url, to: \.stagingBytes) }
+        }
+        return set
+    }
+
+    private static func allItems(in directory: URL) -> [URL] {
+        guard let e = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: nil) else { return [] }
+        return e.compactMap { $0 as? URL }
+    }
+}
+
+/// A physical file: hard links share it.
+private struct FileIdentity: Hashable {
+    let device: UInt64
+    let inode: UInt64
 }
 
 // MARK: - File system implementation
