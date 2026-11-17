@@ -187,15 +187,18 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     /// Settings: the bottom of the navigation bar, plus its scroll-edge effect.
     private let barFadeBottom: CGFloat?
     private let dimmed: Bool
+    /// The scrolling banner area (`BannerArea`), when the banners don't fit and it is on screen.
+    private let bannerScroll: CGRect?
 
     private init(cappedFrames: [String: CGRect], verifiedFrames: [String: CGRect], screen: CGRect,
-                 systemForm: Bool, barFadeBottom: CGFloat?, dimmed: Bool) {
+                 systemForm: Bool, barFadeBottom: CGFloat?, dimmed: Bool, bannerScroll: CGRect?) {
         self.cappedFrames = cappedFrames
         self.verifiedFrames = verifiedFrames
         self.screen = screen
         self.systemForm = systemForm
         self.barFadeBottom = barFadeBottom
         self.dimmed = dimmed
+        self.bannerScroll = bannerScroll
     }
 
     @MainActor
@@ -214,7 +217,8 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
         let barFadeBottom = systemForm && bar.exists ? bar.frame.maxY + scrollEdgeFade : nil
         let log = AuditLog(cappedFrames: frames(cappedTextElements), verifiedFrames: frames(verifiedAtLargestText),
                            screen: app.windows.firstMatch.frame, systemForm: systemForm,
-                           barFadeBottom: barFadeBottom, dimmed: dimmed)
+                           barFadeBottom: barFadeBottom, dimmed: dimmed,
+                           bannerScroll: frames(["bannerScroll"])["bannerScroll"])
         try app.performAccessibilityAudit(for: types) { issue in
             MainActor.assumeIsolated { log.handle(issue) }
         }
@@ -294,6 +298,13 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
         // decorative and hidden from VoiceOver like the real camera preview (it shows above the sheet).
         if type == .elementDetection, frame == nil {
             return "text drawn into the synthetic test footage (preview hidden from VoiceOver)"
+        }
+        // Banners that don't fit scroll (`BannerArea`): their text continues past the scroll area's faded
+        // bottom edge and is read by scrolling (a11y-1c screenshot). XCUITest attaches no element to these
+        // issues, so they are matched by the scroll area being on screen.
+        if type == .textClipped, let bannerScroll,
+           frame.map({ $0.intersects(bannerScroll) && !bannerScroll.contains($0) }) ?? true {
+            return "banner text running on below the scrolling banner area's edge (scrolls)"
         }
         // A row running past the bottom of the screen in a scrolling list is cut by the screen edge, not
         // truncated; the test scrolls and audits again.

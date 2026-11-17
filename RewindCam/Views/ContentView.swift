@@ -265,10 +265,19 @@ private struct BannerArea: View {
             Banners()
             ScrollView {
                 Banners()
+                    .padding(.bottom, 16)
             }
             .scrollBounceBehavior(.basedOnSize)
-            // Shows there is more to read below the visible banners.
+            // Shows there is more to read below the visible banners: the indicator flashes, and the
+            // bottom edge fades out instead of cutting a line of text in half.
             .scrollIndicatorsFlash(onAppear: true)
+            .mask {
+                VStack(spacing: 0) {
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .top, endPoint: .bottom)
+                        .frame(height: 28)
+                }
+            }
             .accessibilityIdentifier("bannerScroll")
         }
     }
@@ -678,12 +687,12 @@ private struct DimOverlay: View {
                 Text("Tap anywhere to wake")
                     .font(.footnote)
                 Text("Volume buttons still save")
-                    .font(.caption2)
+                    .font(.footnote)
             }
             .multilineTextAlignment(.center)
             .padding(.horizontal, 24)
-            // Dim on purpose, but still ≥ 4.5:1 on the overlay's near-black.
-            .foregroundStyle(.white.opacity(0.6))
+            // Dim on purpose, but well above 4.5:1 on the overlay's near-black.
+            .foregroundStyle(.white.opacity(0.7))
         }
         .contentShape(Rectangle())
         .onTapGesture { model.setDimmed(false) }

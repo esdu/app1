@@ -756,7 +756,7 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   at accessibility sizes); Settings rows faded under the navigation bar's scroll-edge effect; on the
   dimmed screen, the contrast of the controls the overlay covers on purpose (the audit measures them
   although they are hidden from VoiceOver; the overlay's own text must pass); and text cut by the
-  screen edge in a scrolling list; and "potentially inaccessible text" with no element (the timestamp
+  screen edge in a scrolling list, or by the scrolling banner area's faded edge; and "potentially inaccessible text" with no element (the timestamp
   drawn into the synthetic test footage, hidden from VoiceOver like the camera preview). Excused issues are
   attached to the test result as `audit-excused-*`. While dimmed, everything under the overlay is
   hidden from VoiceOver and the overlay is modal. Real VoiceOver speech and runtime text-size changes
