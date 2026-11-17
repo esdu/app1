@@ -23,6 +23,8 @@ struct AppEnvironment {
     /// "Open Settings" buttons (microphone notice, camera denied). Opens the real Settings app in
     /// `-UITestMode` too, so a UI test can see it come forward.
     var appSettings: AppSettingsOpener
+    /// The model's timers: the status loop and capture-recovery backoff (issue #4). Tests: `FakeDelayScheduler`.
+    var scheduler: DelayScheduler
     /// On-device "save that" recogniser (nil where unsupported, e.g. UI tests).
     var voice: VoiceTrigger? = nil
     var clock: WallClock = SystemWallClock()
@@ -58,6 +60,7 @@ struct AppEnvironment {
             supportsCaptureButtons: true,
             backgroundTasks: SystemBackgroundTasks(),
             appSettings: SystemAppSettingsOpener(),
+            scheduler: SystemDelayScheduler(),
             voice: SpeechVoiceTrigger()
         )
     }
@@ -101,7 +104,8 @@ struct AppEnvironment {
             fakeLibrary: fake,
             supportsCaptureButtons: false,
             backgroundTasks: SystemBackgroundTasks(),
-            appSettings: appSettings
+            appSettings: appSettings,
+            scheduler: SystemDelayScheduler()
         )
     }
 }

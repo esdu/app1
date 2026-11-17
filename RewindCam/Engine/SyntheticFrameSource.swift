@@ -54,6 +54,10 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     private var audioFailure: AudioUnavailableReason?
     private var startError: FrameSourceError?
     private var starts = 0
+    /// What `runState` reports; follows start/stop and the simulated events (issue #4).
+    private let stateBox = Locked(CaptureRunState.stopped) // a lock, so the main actor never waits on `queue`
+    private var resumeFailuresLeft = 0
+    private var resumes = 0
 
     static let audioSampleRate: Int32 = 48_000
     static let audioChunk = 1_024
@@ -87,6 +91,7 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
                 timer?.cancel()
                 timer = nil
                 timelineStarted = false
+                stateBox.withLock { $0 = .stopped }
                 throw startError
             }
             if followsConfiguration {
@@ -96,18 +101,46 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
             let capture = activeCapture(for: configuration)
             emitsAudio = capture.audioCaptured
             timelineStarted = false
-            if mode == .realTime {
-                timer?.cancel()
-                let t = DispatchSource.makeTimerSource(queue: queue)
-                let interval = 1.0 / Double(format.frameRate)
-                t.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(2))
-                t.setEventHandler { [weak self] in self?.tick() }
-                timer = t
-                t.resume()
-            }
+            stateBox.withLock { $0 = .running }
+            startTimerIfRealTime()
             return capture
         }
     }
+
+    var runState: CaptureRunState { stateBox.current }
+
+    /// Like `CameraFrameSource.resumeRunning()`: running already → true (case (a) of issue #4);
+    /// interrupted → false; stopped → runs again unless `setResumeFailures` says this attempt fails.
+    func resumeRunning() async -> Bool {
+        let running = queue.sync { () -> Bool in
+            resumes += 1
+            switch stateBox.current {
+            case .running:
+                return true
+            case .interrupted:
+                return false
+            case .stopped:
+                if resumeFailuresLeft > 0 {
+                    resumeFailuresLeft -= 1
+                    return false
+                }
+                stateBox.withLock { $0 = .running }
+                startTimerIfRealTime()
+                return true
+            }
+        }
+        if running { eventBox.current?(.interruptionEnded) }
+        return running
+    }
+
+    /// Makes the next `count` `resumeRunning()` calls fail, like a session that won't start while media
+    /// services are still resetting (issue #4, case (b)).
+    func setResumeFailures(_ count: Int) {
+        queue.sync { resumeFailuresLeft = count }
+    }
+
+    /// How many times `resumeRunning()` was called (tests).
+    var resumeCount: Int { queue.sync { resumes } }
 
     /// Simulates a denied or broken microphone (nil: usable). Applies from the next `start(_:)`, like a
     /// permission change on a device. Tests and `-UITestDenyMicrophone` use it.
@@ -129,6 +162,7 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
             timer?.cancel()
             timer = nil
             timelineStarted = false
+            stateBox.withLock { $0 = .stopped }
         }
     }
 
@@ -158,8 +192,36 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     /// Timestamp of the next video frame to be emitted.
     var nextVideoPTS: CMTime { queue.sync { nextVideoTime } }
 
+    /// Emits `event` as a real session would, and updates `runState` to match: an interruption leaves
+    /// the source `.interrupted`, its end `.running`. A runtime error doesn't change `runState`; use
+    /// `simulateRuntimeError(_:sessionStops:)` for that.
     func simulate(_ event: FrameSourceEvent) {
+        queue.sync {
+            switch event {
+            case .interrupted(.runtimeError): break
+            case .interrupted: stateBox.withLock { $0 = .interrupted }
+            case .interruptionEnded: stateBox.withLock { $0 = .running }
+            }
+        }
         eventBox.current?(event)
+    }
+
+    /// A capture-session runtime error (issue #4). `sessionStops: false` is case (a): the session keeps
+    /// running. `true`: it stops (no more frames in real-time mode) until `resumeRunning()` restarts it.
+    func simulateRuntimeError(_ why: String = "simulated runtime error", sessionStops: Bool) {
+        queue.sync {
+            guard sessionStops else { return }
+            stateBox.withLock { $0 = .stopped }
+            timer?.cancel()
+            timer = nil
+        }
+        eventBox.current?(.interrupted(.runtimeError(why)))
+    }
+
+    /// Changes what `runState` reports without emitting anything: a session whose notification never
+    /// arrived (the status-loop safety net's case, issue #4).
+    func setRunStateSilently(_ newState: CaptureRunState) {
+        queue.sync { stateBox.withLock { $0 = newState } }
     }
 
     // MARK: - Private (on `queue`)
@@ -177,6 +239,17 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
             return ActiveCapture(audioCaptured: false, audioUnavailable: .microphoneUnavailable("this source has no audio"))
         }
         return ActiveCapture(audioCaptured: true, audioUnavailable: nil)
+    }
+
+    private func startTimerIfRealTime() {
+        guard mode == .realTime else { return }
+        timer?.cancel()
+        let t = DispatchSource.makeTimerSource(queue: queue)
+        let interval = 1.0 / Double(format.frameRate)
+        t.schedule(deadline: .now(), repeating: interval, leeway: .milliseconds(2))
+        t.setEventHandler { [weak self] in self?.tick() }
+        timer = t
+        t.resume()
     }
 
     private func startTimelineIfNeeded() {

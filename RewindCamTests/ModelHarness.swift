@@ -20,6 +20,8 @@ final class ModelHarness {
     let backgroundTasks = FakeBackgroundTasks()
     /// Counts "Open Settings" taps instead of leaving the app.
     let appSettings = FakeAppSettingsOpener()
+    /// Status loop and recovery backoff: nothing runs until a test calls `scheduler.advance(by:)`.
+    let scheduler = FakeDelayScheduler()
 
     /// A "relaunch" is a second `makeModel()` on the same harness: same storage folders, same fake Photos.
     init(thermal: ThermalLevel = .nominal, suiteName: String = "RewindCamTests-\(UUID().uuidString)") {
@@ -42,7 +44,8 @@ final class ModelHarness {
             settingsStore: UserDefaultsSettingsStore(defaults: defaults), thermal: thermal,
             battery: battery, screen: screen, haptics: haptics,
             realTime: false, fakeLibrary: library, supportsCaptureButtons: false,
-            backgroundTasks: backgroundTasks, appSettings: appSettings, voice: voice, clock: clock)
+            backgroundTasks: backgroundTasks, appSettings: appSettings, scheduler: scheduler, voice: voice,
+            clock: clock)
     }
 
     func makeModel() -> AppModel { AppModel(environment: makeEnvironment()) }

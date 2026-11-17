@@ -32,11 +32,13 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
                                             object: session, queue: nil) { [weak self] _ in
             self?.emit(.interruptionEnded)
         })
+        // A runtime error is only reported here. Recovery is driven by `AppModel` (issue #4): it calls
+        // `resumeRunning()` from its pipeline on a bounded backoff, so a restart can't race a stop or a
+        // reconfigure, and it gives up visibly instead of saying "Restarting…" forever.
         observers.append(center.addObserver(forName: AVCaptureSession.runtimeErrorNotification,
                                             object: session, queue: nil) { [weak self] note in
             let error = note.userInfo?[AVCaptureSessionErrorKey] as? NSError
             self?.emit(.interrupted(.runtimeError(error?.localizedDescription ?? "unknown")))
-            self?.recoverFromRuntimeError()
         })
     }
 
@@ -93,6 +95,28 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
         }
     }
 
+    /// `isRunning` and `isInterrupted` are key-value observable session properties, read here from
+    /// the main actor by the status loop.
+    var runState: CaptureRunState {
+        if session.isInterrupted { return .interrupted }
+        return session.isRunning ? .running : .stopped
+    }
+
+    /// Closes both gaps of the old one-shot recovery (issue #4): (a) a session that is still, or
+    /// already again, running now reports `.interruptionEnded`, so the recorder is resumed; (b) a
+    /// session that doesn't start returns false, and `AppModel` tries again on its backoff.
+    func resumeRunning() async -> Bool {
+        let running = await withCheckedContinuation { (cont: CheckedContinuation<Bool, Never>) in
+            sessionQueue.async { [self] in
+                // An interrupted session is resumed by iOS, which then posts `interruptionEnded`.
+                if !session.isRunning, !session.isInterrupted { session.startRunning() }
+                cont.resume(returning: session.isRunning && !session.isInterrupted)
+            }
+        }
+        if running { emit(.interruptionEnded) }
+        return running
+    }
+
     // MARK: Sample delegates
 
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer,
@@ -104,14 +128,6 @@ final class CameraFrameSource: NSObject, FrameSource, AVCaptureVideoDataOutputSa
     // MARK: - Private
 
     private func emit(_ event: FrameSourceEvent) { eventBox.current?(event) }
-
-    private func recoverFromRuntimeError() {
-        sessionQueue.async { [self] in
-            guard !session.isRunning else { return }
-            session.startRunning()
-            if session.isRunning { emit(.interruptionEnded) }
-        }
-    }
 
     private static func requestAccess(for type: AVMediaType) async -> Bool {
         switch AVCaptureDevice.authorizationStatus(for: type) {
