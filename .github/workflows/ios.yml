@@ -19,7 +19,7 @@ jobs:
     name: Build & test (Simulator)
     # Newest GitHub-hosted macOS image (see actions/runner-images README).
     runs-on: macos-26
-    timeout-minutes: 30
+    timeout-minutes: 45 # the full run takes ~30 min (Test ~19, stress ~6, boot ~3); per-test limits stay 180 s / 300 s
     env:
       RESULT_BUNDLE: TestResults.xcresult
     steps:
