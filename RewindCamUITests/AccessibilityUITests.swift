@@ -90,8 +90,16 @@ final class AccessibilityUITests: XCTestCase {
 
         Thread.sleep(forTimeInterval: 4) // let the synthetic buffer fill
         app.buttons["saveButton"].tap()
-        XCTAssertTrue(element(app, "unsavedBanner").waitForExistence(timeout: 20),
-                      "no unsaved-clips banner after the failed Photos save")
+        let toast = element(app, "toast")
+        XCTAssertTrue(toast.waitForExistence(timeout: 10), "no toast after Save")
+        if !element(app, "unsavedBanner").waitForExistence(timeout: 20) {
+            screenshot(app, "a11y-failed-no-unsaved-banner")
+            let text = app.descendants(matching: .any)
+                .matching(NSPredicate(format: "label CONTAINS %@", "in Photos yet")).firstMatch
+            XCTFail("no unsaved-clips banner after the failed Photos save; toast: \(toast.exists ? toast.label : "none"); "
+                + "banner text on screen: \(text.exists); banner scroll area: \(element(app, "bannerScroll").exists); "
+                + "fake library: \(element(app, "fakeLibraryCount").label)")
+        }
         screenshot(app, "a11y-1b-three-banners")
         assertMainScreenFits(app, "three banners")
         // Audit once the toast has gone (it fades), so nothing is moving.
