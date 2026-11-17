@@ -281,7 +281,7 @@ final class AppModel {
     }
 
     /// The most RewindCam's temporary media can take at the current settings (issue #14): ring + one
-    /// save's job folder + its export peak. Kept clips come on top (`unsavedClipBytes`).
+    /// save's job folder + its export output. Kept clips come on top (`unsavedClipBytes`).
     var temporaryMediaCapBytes: Int64 {
         BufferMath.temporaryMediaCapBytes(
             RollingRecorder.Configuration(bufferSeconds: settings.bufferSeconds, preset: activePreset,
