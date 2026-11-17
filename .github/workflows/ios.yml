@@ -66,10 +66,15 @@ jobs:
             -test-timeouts-enabled YES \
             -default-test-execution-time-allowance 180 \
             -maximum-test-execution-time-allowance 300 \
+            -only-testing:RewindCamUITests/AccessibilityUITests/testAccessibilityAuditMainScreen \
+            -only-testing:RewindCamUITests/AccessibilityUITests/testAccessibilityAuditSettings \
+            -only-testing:RewindCamUITests/AccessibilityUITests/testTemporaryOldSequenceRepro \
+            -test-iterations 5 \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee xcodebuild.log | { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
 
       - name: Stress unit tests (flake detector)
+        if: false # TEMPORARY: accessibility repro run
         # Re-runs the unit tests (not UI tests) a few times on the already-built products,
         # to catch intermittent crashes or timing-dependent failures.
         run: |

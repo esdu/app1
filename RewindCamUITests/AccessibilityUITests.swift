@@ -6,8 +6,9 @@ import XCTest
 ///   three banners at once (microphone denied, low storage, a clip that didn't reach Photos) and checks
 ///   that the status bar, the Pause, Dim, Save and Settings controls are on screen, hittable and don't
 ///   overlap. Screenshots `a11y-*` are published by CI to be checked by eye.
-/// * `testAccessibilityAudit` runs `performAccessibilityAudit()` on the main screen (recording, dimmed,
-///   paused) and Settings. Exclusions are listed, with the reason, in `AuditLog.excuse`.
+/// * `testAccessibilityAuditMainScreen` and `testAccessibilityAuditSettings` run
+///   `performAccessibilityAudit()` on the main screen (recording, dimmed, paused) and on Settings (top,
+///   and scrolled to the end). Exclusions are listed, with the reason, in `AuditLog.excuse`.
 final class AccessibilityUITests: XCTestCase {
 
     /// The largest Dynamic Type size (Settings › Accessibility › Display & Text Size › Larger Text, all
@@ -128,47 +129,152 @@ final class AccessibilityUITests: XCTestCase {
         XCTAssertTrue(element(app, "userPausedBanner").waitForExistence(timeout: 10), "no paused banner")
         screenshot(app, "a11y-4-paused")
         assertMainScreenFits(app, "paused")
-        app.buttons["resumeButton"].tap()
-        waitUntilRecording(app)
+        resume(app)
     }
 
+    /// Main screen: recording (no contrast: the background is the synthetic colour bars), dimmed, and
+    /// paused (black preview, contrast included). Settings is audited by its own test, so each stays well
+    /// under the per-test time allowance.
     @MainActor
-    func testAccessibilityAudit() throws {
-        continueAfterFailure = true // audit every screen, so one run reports everything
+    func testAccessibilityAuditMainScreen() throws {
         let app = launch([])
         waitUntilRecording(app)
-        // Contrast is checked on the paused screen below (black preview): here the background is the
-        // synthetic colour-bar pattern, so contrast results would describe the test footage, not the app.
         try AuditLog.run(on: app, "main screen, recording", types: XCUIAccessibilityAuditType.all.subtracting(.contrast),
                          test: self)
 
         app.buttons["dimButton"].tap()
         let overlay = element(app, "dimOverlay")
-        XCTAssertTrue(overlay.waitForExistence(timeout: 5))
+        XCTAssertTrue(overlay.waitForExistence(timeout: 5), "dim overlay did not appear")
         try AuditLog.run(on: app, "dimmed", types: .all, dimmed: true, test: self)
         overlay.tap()
-        XCTAssertTrue(overlay.waitForNonExistence(timeout: 5))
+        XCTAssertTrue(overlay.waitForNonExistence(timeout: 5), "dim overlay did not go away")
 
+        pause(app)
+        screenshot(app, "a11y-audit-paused")
+        try AuditLog.run(on: app, "main screen, paused", types: .all, test: self)
+        resume(app)
+    }
+
+    /// Settings, at the top and scrolled to the end, opened while paused so nothing behind the sheet moves.
+    @MainActor
+    func testAccessibilityAuditSettings() throws {
+        let app = launch([])
+        waitUntilRecording(app)
+        pause(app)
+        openSettings(app)
+        try AuditLog.run(on: app, "Settings", types: .all, systemForm: true, test: self)
+        scrollSettingsToEnd(app)
+        screenshot(app, "a11y-audit-settings-scrolled")
+        try AuditLog.run(on: app, "Settings, scrolled to the end", types: .all, systemForm: true, test: self)
+        closeSettings(app)
+        resume(app)
+    }
+
+    // TEMPORARY (repro of the flaky "Settings, scrolled down" issue): the sequence as merged in #32.
+    @MainActor
+    func testTemporaryOldSequenceRepro() throws {
+        continueAfterFailure = true
+        let app = launch([])
+        waitUntilRecording(app)
         Thread.sleep(forTimeInterval: 2)
         app.buttons["pauseButton"].tap()
         let confirm = app.buttons["Pause and discard buffer"]
         if confirm.waitForExistence(timeout: 5) { confirm.tap() }
         XCTAssertTrue(element(app, "userPausedBanner").waitForExistence(timeout: 10))
-        screenshot(app, "a11y-audit-paused")
-        try AuditLog.run(on: app, "main screen, paused", types: .all, test: self)
-
         app.buttons["settingsButton"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-        Thread.sleep(forTimeInterval: 1) // sheet animation
-        try AuditLog.run(on: app, "Settings", types: .all, systemForm: true, test: self)
+        Thread.sleep(forTimeInterval: 1)
         app.swipeUp()
         app.swipeUp()
-        Thread.sleep(forTimeInterval: 2) // let the scroll come to rest: the audit measures what is drawn
-        screenshot(app, "a11y-audit-settings-scrolled")
-        try AuditLog.run(on: app, "Settings, scrolled down", types: .all, systemForm: true, test: self)
+        Thread.sleep(forTimeInterval: 2)
+        screenshot(app, "repro-settings-scrolled")
+        try AuditLog.run(on: app, "REPRO Settings, scrolled down", types: .all, systemForm: true, test: self)
         app.buttons["doneButton"].tap()
+        let stillOpen = app.navigationBars["Settings"].exists
         app.buttons["resumeButton"].tap()
-        waitUntilRecording(app)
+        screenshot(app, "repro-after-resume-tap")
+        let badge = element(app, "recordingBadge")
+        let left = NSPredicate(format: "label != %@", "Paused by you")
+        let result = XCTWaiter.wait(for: [expectation(for: left, evaluatedWith: badge)], timeout: 5)
+        print("REPRO resume: sheet still open at tap = \(stillOpen), badge left pause = \(result == .completed)")
+        XCTAssertEqual(result, .completed, "REPRO: Resume tap had no effect (sheet still open at tap: \(stillOpen))")
+    }
+
+    // MARK: Steps shared by the audit tests. Each waits for the state it needs and fails at once, with
+    // what it saw, if that state doesn't come.
+
+    /// Pause, confirming the discard if asked; returns once the paused banner is shown.
+    @MainActor
+    private func pause(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        Thread.sleep(forTimeInterval: 2) // a little buffer, so Pause asks before discarding it
+        app.buttons["pauseButton"].tap()
+        let confirm = app.buttons["Pause and discard buffer"]
+        if confirm.waitForExistence(timeout: 5) { confirm.tap() }
+        XCTAssertTrue(element(app, "userPausedBanner").waitForExistence(timeout: 10), "no paused banner after Pause",
+                      file: file, line: line)
+    }
+
+    /// Resume: waits until the button can really take the tap (no sheet or dialog over it), taps it, and
+    /// checks that the tap took effect before waiting for recording.
+    @MainActor
+    private func resume(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let resume = app.buttons["resumeButton"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 5), "no Resume button", file: file, line: line)
+        let hittable = XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "isHittable == true"),
+                                                        evaluatedWith: resume)], timeout: 5)
+        XCTAssertEqual(hittable, .completed, "Resume is covered (not hittable)", file: file, line: line)
+        resume.tap()
+        let badge = element(app, "recordingBadge")
+        let leftPause = NSPredicate(format: "label != %@", "Paused by you")
+        let took = XCTWaiter.wait(for: [expectation(for: leftPause, evaluatedWith: badge)], timeout: 5)
+        if took != .completed { screenshot(app, "resume-tap-had-no-effect") }
+        XCTAssertEqual(took, .completed, "the Resume tap had no effect; badge says \(badge.label)", file: file, line: line)
+        waitUntilRecording(app, file: file, line: line)
+    }
+
+    @MainActor
+    private func openSettings(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        app.buttons["settingsButton"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5), "Settings did not open",
+                      file: file, line: line)
+        waitUntilStill(app.buttons["doneButton"], "Settings sheet", file: file, line: line)
+    }
+
+    @MainActor
+    private func closeSettings(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        app.buttons["doneButton"].tap()
+        XCTAssertTrue(app.navigationBars["Settings"].waitForNonExistence(timeout: 5), "Settings sheet didn't close",
+                      file: file, line: line)
+    }
+
+    /// Scrolls the Settings form to its end (the Privacy note, its last row) and waits for it to stop, so
+    /// the audit always sees the same rows in the same places.
+    @MainActor
+    private func scrollSettingsToEnd(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
+        let last = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@",
+                                                        "RewindCam works entirely offline")).firstMatch
+        var swipes = 0
+        while !(last.exists && last.isHittable), swipes < 8 {
+            app.swipeUp()
+            swipes += 1
+        }
+        app.swipeUp() // against the end, whatever the swipes' momentum left
+        XCTAssertTrue(last.exists, "the end of Settings was not reached", file: file, line: line)
+        waitUntilStill(last, "Settings scroll", file: file, line: line)
+    }
+
+    /// Waits until `element`'s frame is the same on consecutive reads (animation or scrolling is over).
+    @MainActor
+    private func waitUntilStill(_ element: XCUIElement, _ what: String,
+                                file: StaticString = #filePath, line: UInt = #line) {
+        var previous = element.frame
+        for _ in 0..<20 {
+            Thread.sleep(forTimeInterval: 0.3)
+            let now = element.frame
+            if now == previous { return }
+            previous = now
+        }
+        XCTFail("\(what) still moving after 6 s", file: file, line: line)
     }
 }
 
@@ -228,9 +334,12 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
             note.lifetime = .keepAlways
             test.add(note)
         }
+        for excused in log.excused { print("AUDIT excused, \(screenName): \(excused)") } // TEMPORARY
+        for problem in log.problems { print("AUDIT issue, \(screenName): \(problem)") }
+        // One line, so the whole list shows in the CI log and summary.
         XCTAssertTrue(log.problems.isEmpty,
-                      "Accessibility audit, \(screenName): \(log.problems.count) issue(s):\n"
-                          + log.problems.joined(separator: "\n"),
+                      "Accessibility audit, \(screenName): \(log.problems.count) issue(s): "
+                          + log.problems.joined(separator: " || "),
                       file: file, line: line)
     }
 
