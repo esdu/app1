@@ -113,8 +113,7 @@ final class AccessibilityUITests: XCTestCase {
         app.swipeUp()
         screenshot(app, "a11y-2c-settings-end")
         XCTAssertTrue(app.buttons["doneButton"].isHittable, "Done is not reachable after scrolling")
-        app.buttons["doneButton"].tap()
-        XCTAssertTrue(app.navigationBars["Settings"].waitForNonExistence(timeout: 5))
+        closeSettings(app)
 
         app.buttons["dimButton"].tap()
         let overlay = element(app, "dimOverlay")
@@ -155,7 +154,14 @@ final class AccessibilityUITests: XCTestCase {
         resume(app)
     }
 
-    /// Settings, at the top and scrolled to the end, opened while paused so nothing behind the sheet moves.
+    /// Settings, opened while paused so nothing behind the sheet moves: everything at the top, and
+    /// everything but contrast once scrolled to the end.
+    ///
+    /// Contrast is audited at the top only. Scrolled down, some row always sits half under the navigation
+    /// bar; the audit scrolls the Form to reveal it and measures contrast while the rows are still moving,
+    /// so it reports random rows (even white text in opaque cells), at frames about 60 pt below where they
+    /// were drawn. The rows further down use the same system Form text styles as the ones contrast-audited
+    /// at the top (section headers and footers, row labels and values, toggle labels).
     @MainActor
     func testAccessibilityAuditSettings() throws {
         let app = launch([])
@@ -165,39 +171,9 @@ final class AccessibilityUITests: XCTestCase {
         try AuditLog.run(on: app, "Settings", types: .all, systemForm: true, test: self)
         scrollSettingsToEnd(app)
         screenshot(app, "a11y-audit-settings-scrolled")
-        try AuditLog.run(on: app, "Settings, scrolled to the end", types: .all, systemForm: true, test: self)
+        try AuditLog.run(on: app, "Settings, scrolled to the end", types: XCUIAccessibilityAuditType.all.subtracting(.contrast),
+                         systemForm: true, test: self)
         closeSettings(app)
-        resume(app)
-    }
-
-    // TEMPORARY (repro of the flaky "Settings, scrolled down" issue): the sequence as merged in #32.
-    @MainActor
-    func testTemporaryOldSequenceRepro() throws {
-        continueAfterFailure = true
-        let app = launch([])
-        waitUntilRecording(app)
-        Thread.sleep(forTimeInterval: 2)
-        app.buttons["pauseButton"].tap()
-        let confirm = app.buttons["Pause and discard buffer"]
-        if confirm.waitForExistence(timeout: 5) { confirm.tap() }
-        XCTAssertTrue(element(app, "userPausedBanner").waitForExistence(timeout: 10))
-        app.buttons["settingsButton"].tap()
-        XCTAssertTrue(app.navigationBars["Settings"].waitForExistence(timeout: 5))
-        Thread.sleep(forTimeInterval: 1)
-        app.swipeUp()
-        app.swipeUp()
-        Thread.sleep(forTimeInterval: 2)
-        screenshot(app, "repro-settings-scrolled")
-        try AuditLog.run(on: app, "REPRO Settings, scrolled down", types: .all, systemForm: true, test: self)
-        app.buttons["doneButton"].tap()
-        let stillOpen = app.navigationBars["Settings"].exists
-        app.buttons["resumeButton"].tap()
-        screenshot(app, "repro-after-resume-tap")
-        let badge = element(app, "recordingBadge")
-        let left = NSPredicate(format: "label != %@", "Paused by you")
-        let result = XCTWaiter.wait(for: [expectation(for: left, evaluatedWith: badge)], timeout: 5)
-        print("REPRO resume: sheet still open at tap = \(stillOpen), badge left pause = \(result == .completed)")
-        XCTAssertEqual(result, .completed, "REPRO: Resume tap had no effect (sheet still open at tap: \(stillOpen))")
     }
 
     // MARK: Steps shared by the audit tests. Each waits for the state it needs and fails at once, with
@@ -245,6 +221,13 @@ final class AccessibilityUITests: XCTestCase {
         app.buttons["doneButton"].tap()
         XCTAssertTrue(app.navigationBars["Settings"].waitForNonExistence(timeout: 5), "Settings sheet didn't close",
                       file: file, line: line)
+        // Its elements leave the accessibility tree as the sheet starts to slide away; a tap sent before
+        // the slide is over lands on the sheet and is lost. Wait until the main screen under it is back.
+        let settings = app.buttons["settingsButton"]
+        let back = XCTWaiter.wait(for: [expectation(for: NSPredicate(format: "isHittable == true"),
+                                                    evaluatedWith: settings)], timeout: 5)
+        XCTAssertEqual(back, .completed, "the main screen didn't come back after Settings closed", file: file, line: line)
+        Thread.sleep(forTimeInterval: 1) // the rest of the slide
     }
 
     /// Scrolls the Settings form to its end (the Privacy note, its last row) and waits for it to stop, so
@@ -290,19 +273,16 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     private let verifiedFrames: [String: CGRect]
     private let screen: CGRect
     private let systemForm: Bool
-    /// Settings: the bottom of the navigation bar, plus its scroll-edge effect.
-    private let barFadeBottom: CGFloat?
     private let dimmed: Bool
     /// The scrolling banner area (`BannerArea`), when the banners don't fit and it is on screen.
     private let bannerScroll: CGRect?
 
     private init(cappedFrames: [String: CGRect], verifiedFrames: [String: CGRect], screen: CGRect,
-                 systemForm: Bool, barFadeBottom: CGFloat?, dimmed: Bool, bannerScroll: CGRect?) {
+                 systemForm: Bool, dimmed: Bool, bannerScroll: CGRect?) {
         self.cappedFrames = cappedFrames
         self.verifiedFrames = verifiedFrames
         self.screen = screen
         self.systemForm = systemForm
-        self.barFadeBottom = barFadeBottom
         self.dimmed = dimmed
         self.bannerScroll = bannerScroll
     }
@@ -319,11 +299,8 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
             }
             return found
         }
-        let bar = app.navigationBars.firstMatch
-        let barFadeBottom = systemForm && bar.exists ? bar.frame.maxY + scrollEdgeFade : nil
         let log = AuditLog(cappedFrames: frames(cappedTextElements), verifiedFrames: frames(verifiedAtLargestText),
-                           screen: app.windows.firstMatch.frame, systemForm: systemForm,
-                           barFadeBottom: barFadeBottom, dimmed: dimmed,
+                           screen: app.windows.firstMatch.frame, systemForm: systemForm, dimmed: dimmed,
                            bannerScroll: frames(["bannerScroll"])["bannerScroll"])
         try app.performAccessibilityAudit(for: types) { issue in
             MainActor.assumeIsolated { log.handle(issue) }
@@ -334,8 +311,6 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
             note.lifetime = .keepAlways
             test.add(note)
         }
-        for excused in log.excused { print("AUDIT excused, \(screenName): \(excused)") } // TEMPORARY
-        for problem in log.problems { print("AUDIT issue, \(screenName): \(problem)") }
         // One line, so the whole list shows in the CI log and summary.
         XCTAssertTrue(log.problems.isEmpty,
                       "Accessibility audit, \(screenName): \(log.problems.count) issue(s): "
@@ -386,10 +361,6 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
         if systemForm, type == .dynamicType, partial {
             return "system Form row or toolbar button, shown at full size at the largest text size (a11y-2*)"
         }
-        // Rows scrolled under the navigation bar are faded by its scroll-edge effect on purpose.
-        if systemForm, type == .contrast, let frame, let barFadeBottom, frame.minY < barFadeBottom {
-            return "scrolled under the navigation bar, faded by its scroll-edge effect"
-        }
         // While dimmed, the controls are covered by the 92 % black overlay on purpose and hidden from
         // VoiceOver; the audit still measures their text. The overlay's own text must pass.
         if dimmed, type == .contrast, !Self.dimOverlayTexts.contains(where: { label.hasPrefix($0) }),
@@ -399,7 +370,7 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
         // Settings is a standard Form. Issues XCUITest can't attach to any element there come from the
         // UIKit internals of its system controls (segmented pickers, switches, the navigation bar);
         // at accessibility sizes the segmented pickers are replaced by menus (a11y-2* screenshots).
-        if systemForm, frame == nil, type == .dynamicType || type == .textClipped || type == .contrast {
+        if systemForm, frame == nil, type == .dynamicType || type == .textClipped {
             return "no element: UIKit internals of a system control in the Settings Form"
         }
         // "Text that should be accessible" with no element: the only drawn text the app doesn't expose is
@@ -440,8 +411,6 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
     /// The dim overlay's own text (ContentView `DimOverlay`).
     static let dimOverlayTexts = ["Recording ·", "Not recording", "Tap anywhere to wake", "Volume buttons still save"]
 
-    /// How far below the navigation bar its scroll-edge effect fades content (iOS 26).
-    static let scrollEdgeFade: CGFloat = 40
 
     static func name(_ type: XCUIAccessibilityAuditType) -> String {
         let known: [(XCUIAccessibilityAuditType, String)] = [

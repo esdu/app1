@@ -68,8 +68,8 @@ jobs:
             -maximum-test-execution-time-allowance 300 \
             -only-testing:RewindCamUITests/AccessibilityUITests/testAccessibilityAuditMainScreen \
             -only-testing:RewindCamUITests/AccessibilityUITests/testAccessibilityAuditSettings \
-            -only-testing:RewindCamUITests/AccessibilityUITests/testTemporaryOldSequenceRepro \
-            -test-iterations 5 \
+            -only-testing:RewindCamUITests/AccessibilityUITests/testLargestTextKeepsEverythingReachable \
+            -test-iterations 4 \
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee xcodebuild.log | { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
 
