@@ -41,6 +41,9 @@ struct AppEnvironment {
     static let uiTestDenyCameraArgument = "-UITestDenyCamera"
     /// With `-UITestMode`: the synthetic source fails every start with "no camera" (Try Again path).
     static let uiTestNoCameraArgument = "-UITestNoCamera"
+    /// With `-UITestMode`: a few seconds after capture starts, the synthetic camera stops delivering
+    /// video (while still "running") until it is restarted: the frame watchdog's case (issue #9).
+    static let uiTestStallVideoArgument = "-UITestStallVideo"
 
     static func current(arguments: [String] = ProcessInfo.processInfo.arguments) -> AppEnvironment {
         arguments.contains(uiTestArgument) ? uiTest(arguments: arguments) : live()
@@ -88,6 +91,9 @@ struct AppEnvironment {
             source.setStartError(.cameraAccessDenied)
         } else if arguments.contains(uiTestNoCameraArgument) {
             source.setStartError(.noCamera)
+        }
+        if arguments.contains(uiTestStallVideoArgument) {
+            source.stallVideoOnce(afterStartBy: 3)
         }
         let appSettings = UITestAppSettingsOpener { [source] in
             if denyCamera { source.setStartError(nil) }
