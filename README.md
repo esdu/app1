@@ -39,7 +39,10 @@ source, because the Simulator has no camera.*
   uses the "available after first unlock" protection class, so a save can finish while the phone is locked.
 - **Voice trigger** (optional, off by default): say "save that" (or "save this"). Recognition is
   **on-device only** (`requiresOnDeviceRecognition`). The app measures battery drain per hour, so you
-  can see what the voice trigger costs.
+  can see what the voice trigger costs. If speech recognition keeps failing, it retries for about 30 s,
+  then stops: a toast says "The voice trigger stopped: speech recognition isn't available." and the
+  "Listening" row says "No — speech recognition isn't available". It tries again the next time recording
+  starts or resumes, or when you turn it off and on.
 
 **Long sessions**
 
@@ -481,6 +484,13 @@ Turn on "Say “save that” to save" in RewindCam's Settings and allow Speech R
       then say "save that". **Pass:** it still saves a clip, and the "Listening" row still says "Yes".
 - [ ] **Several in a row**: say "save that" three times, each after the previous toast. **Pass:** three
       clips, one per phrase; no second save fires on its own and no "Already saving" toast appears.
+- [ ] **Recognition unavailable (#36)**: with the voice trigger listening, turn off Siri & Dictation
+      (Settings › Siri, or Screen Time › Content & Privacy Restrictions › Allowed Apps), return to
+      RewindCam and wait a minute. **Pass:** either it still says "Yes" and "save that" still saves, or,
+      within about 30 s, a toast says "The voice trigger stopped: speech recognition isn't available.",
+      the "Listening" row says "No — speech recognition isn't available", recording and Save carry on
+      and the phone doesn't get noticeably warm. Turn Siri & Dictation back on, then turn the voice
+      trigger off and on. **Pass:** "Listening" says "Yes" and "save that" saves a clip.
 
 ### 10. Accessibility (#11)
 
