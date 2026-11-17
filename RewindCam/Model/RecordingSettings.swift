@@ -102,37 +102,62 @@ struct RecordingSettings: Codable, Equatable, Sendable {
 protocol SettingsStore: AnyObject {
     func load() -> RecordingSettings
     func save(_ settings: RecordingSettings)
-    /// The screen brightness from before Dim lowered it (0...1). Written just before the system brightness
-    /// goes down, cleared (`nil`) once it is back, so a value found at launch means the last run ended
-    /// while dimmed (kill, crash, memory pressure) and the screen may still be at 2 % (`AppModel`, "Dim").
-    func loadDimRestoreBrightness() -> Double?
-    func saveDimRestoreBrightness(_ brightness: Double?)
+    /// What Dim must put back (issue #38). Written just before the system brightness goes down, cleared
+    /// (`nil`) once it is back, so a value found at launch means the last run ended while dimmed (kill,
+    /// crash, memory pressure) and the screen may still be dark (`AppModel`, "Dim").
+    func loadDimRestore() -> DimRestore?
+    func saveDimRestore(_ restore: DimRestore?)
+}
+
+/// The brightness Dim must put back, and the level the screen reported once dimmed.
+struct DimRestore: Equatable, Sendable {
+    /// The screen brightness from before Dim lowered it (0...1).
+    var brightness: Double
+    /// What the screen read back after Dim set `AppModel.dimmedBrightness` (a device may clamp or round
+    /// it). "Still dimmed" means the screen is still at this level. nil until read, or if what was stored
+    /// can't be read: `AppModel.dimmedBrightness` itself stands in.
+    var dimmedReadBack: Double?
 }
 
 final class UserDefaultsSettingsStore: SettingsStore {
     private let defaults: UserDefaults
     private let key: String
     private let dimRestoreKey: String
+    private let dimReadBackKey: String
 
     init(defaults: UserDefaults = .standard, key: String = "recordingSettings.v1",
-         dimRestoreKey: String = "dimRestoreBrightness.v1") {
+         dimRestoreKey: String = "dimRestoreBrightness.v1",
+         dimReadBackKey: String = "dimRestoreDimmedReadBack.v1") {
         self.defaults = defaults
         self.key = key
         self.dimRestoreKey = dimRestoreKey
+        self.dimReadBackKey = dimReadBackKey
     }
 
-    func loadDimRestoreBrightness() -> Double? {
-        guard let value = defaults.object(forKey: dimRestoreKey) as? Double,
-              value.isFinite, (0...1).contains(value) else { return nil }
-        return value
+    func loadDimRestore() -> DimRestore? {
+        guard let brightness = brightnessValue(forKey: dimRestoreKey) else { return nil }
+        return DimRestore(brightness: brightness, dimmedReadBack: brightnessValue(forKey: dimReadBackKey))
     }
 
-    func saveDimRestoreBrightness(_ brightness: Double?) {
-        if let brightness {
-            defaults.set(brightness, forKey: dimRestoreKey)
+    func saveDimRestore(_ restore: DimRestore?) {
+        if let restore {
+            defaults.set(restore.brightness, forKey: dimRestoreKey)
+            if let readBack = restore.dimmedReadBack {
+                defaults.set(readBack, forKey: dimReadBackKey)
+            } else {
+                defaults.removeObject(forKey: dimReadBackKey)
+            }
         } else {
             defaults.removeObject(forKey: dimRestoreKey)
+            defaults.removeObject(forKey: dimReadBackKey)
         }
+    }
+
+    /// A stored brightness, or nil if missing, not a number or outside 0...1.
+    private func brightnessValue(forKey key: String) -> Double? {
+        guard let value = defaults.object(forKey: key) as? Double, value.isFinite, (0...1).contains(value)
+        else { return nil }
+        return value
     }
 
     func load() -> RecordingSettings {

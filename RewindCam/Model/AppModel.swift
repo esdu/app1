@@ -141,8 +141,11 @@ final class AppModel {
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     /// Dim (issue #38): the brightness to put back while RewindCam holds the system brightness at
     /// `dimmedBrightness`; nil while it doesn't (awake, or dimmed with the scene not active). Mirrored in
-    /// `settingsStore` (`saveDimRestoreBrightness`) so the next launch can put it back after a kill.
+    /// `settingsStore` (`saveDimRestore`) so the next launch can put it back after a kill.
     @ObservationIgnored private var savedBrightness: CGFloat?
+    /// What the screen read back after Dim set `dimmedBrightness` (a device may clamp or round it); the
+    /// level that counts as "still dimmed" when putting `savedBrightness` back. Persisted with it.
+    @ObservationIgnored private var dimmedReadBack: CGFloat?
     /// The scene is `.active` (last `scenePhaseChanged`). The system brightness follows Dim only then;
     /// the overlay stays up regardless. True until told otherwise: Dim is tapped in an active scene.
     @ObservationIgnored private var sceneIsActive = true
@@ -910,23 +913,30 @@ final class AppModel {
     }
 
     /// Remembers the current brightness (in memory and in the store, written first so a kill from here on
-    /// can be undone at the next launch) and lowers it. Does nothing if already lowered.
+    /// can be undone at the next launch), lowers it, and remembers what the screen then reports.
+    /// Does nothing if already lowered.
     private func lowerBrightness() {
         restoreBrightnessFromLastRun() // never overwrite what a killed run left to restore
         guard savedBrightness == nil else { return }
         let current = environment.screen.brightness
         savedBrightness = current
-        environment.settingsStore.saveDimRestoreBrightness(Double(current))
+        environment.settingsStore.saveDimRestore(DimRestore(brightness: Double(current), dimmedReadBack: nil))
         environment.screen.brightness = Self.dimmedBrightness
+        let readBack = environment.screen.brightness
+        dimmedReadBack = readBack
+        environment.settingsStore.saveDimRestore(DimRestore(brightness: Double(current),
+                                                            dimmedReadBack: Double(readBack)))
     }
 
     /// Puts back the remembered brightness (unless changed meanwhile) and forgets it. Does nothing if
     /// the brightness isn't lowered.
     private func restoreBrightness() {
         guard let saved = savedBrightness else { return }
+        let readBack = dimmedReadBack
         savedBrightness = nil
-        Self.putBack(saved, on: environment.screen)
-        environment.settingsStore.saveDimRestoreBrightness(nil)
+        dimmedReadBack = nil
+        Self.putBack(saved, ifStillAt: readBack, on: environment.screen)
+        environment.settingsStore.saveDimRestore(nil)
     }
 
     /// Once per process, at the first foreground scene phase: a run that ended while dimmed (kill, crash)
@@ -935,15 +945,17 @@ final class AppModel {
     private func restoreBrightnessFromLastRun() {
         guard !checkedLastRunBrightness else { return }
         checkedLastRunBrightness = true
-        guard let pending = environment.settingsStore.loadDimRestoreBrightness() else { return }
-        Self.putBack(CGFloat(pending), on: environment.screen)
-        environment.settingsStore.saveDimRestoreBrightness(nil)
+        guard let pending = environment.settingsStore.loadDimRestore() else { return }
+        Self.putBack(CGFloat(pending.brightness), ifStillAt: pending.dimmedReadBack.map { CGFloat($0) },
+                     on: environment.screen)
+        environment.settingsStore.saveDimRestore(nil)
     }
 
-    /// `saved` unless the screen is no longer at the dimmed level (the user, auto-brightness or a lock
-    /// since a kill changed it): then what they set wins.
-    private static func putBack(_ saved: CGFloat, on screen: ScreenController) {
-        guard abs(screen.brightness - dimmedBrightness) < 0.005 else { return }
+    /// `saved` unless the screen is no longer at the dimmed level, i.e. what it read back once dimmed
+    /// (`dimmedBrightness` if that isn't known): a level the user, auto-brightness or a lock since a kill
+    /// set wins.
+    private static func putBack(_ saved: CGFloat, ifStillAt dimmedLevel: CGFloat?, on screen: ScreenController) {
+        guard abs(screen.brightness - (dimmedLevel ?? dimmedBrightness)) < 0.005 else { return }
         screen.brightness = saved
     }
 
