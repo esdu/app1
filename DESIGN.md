@@ -739,6 +739,17 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   the halt; an oversized fragment, a full disk, forced copy fallback with little room, exports while
   capture continues, and a soak over every preset and buffer length (bitrates ÷100, VBR 0.5–1.5×, and an
   8× overshoot at 4K60) check the disk bounds by enumerating the folders.
+* **Flake detector**: CI re-runs the unit tests 4× after the main run (`-run-tests-until-failure`); its
+  failing tests and messages are appended to the job summary and `test-summary.md` ("Stress run").
+  It caught one flake: `writerAudioInputWithoutSamples(realTime: true)` timed out waiting for segments
+  ("no segment through …"). The test pushed 6 s of frames back to back into a *real-time* writer, which
+  drops every frame its input isn't ready for; how many survived depended on timing and load (usually
+  enough; in a reproduction on CI only 3 to 33 of the 90), and with too few no segment was ever emitted. Real-time recorder tests now feed frames
+  with `RecorderHarness.generatePaced`: each frame only once the writer's video input is ready, as a
+  camera feeds an encoder that keeps up. No frame is dropped (the test checks every one was appended),
+  so the segments are the offline writer's whatever the load. Otherwise bursts (`source.generate`) go
+  to the default non-real-time writer, whose appends wait for the encoder instead of dropping; the one
+  model test with a real-time writer (`audioDoesNotMaskVideoStall`) doesn't depend on which frames survive.
 * **Not covered by CI**: `CameraFrameSource` (including the real camera and microphone prompts and
   their failure paths), `AVCaptureEventInteraction` (volume buttons),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),

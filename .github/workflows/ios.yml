@@ -98,6 +98,21 @@ jobs:
             xcrun xcresulttool get test-results tests --path "$RESULT_BUNDLE" > artifacts/tests.json || true
           fi
           python3 scripts/summarize-xcresult.py artifacts/summary.json artifacts/tests.json > artifacts/test-summary.md || true
+          # The stress run (flake detector) has its own bundle: name its failing tests and messages too,
+          # so an intermittent failure is visible in the step summary and refs/ci/screenshots.
+          if [ -d StressResults.xcresult ]; then
+            xcrun xcresulttool get test-results summary --path StressResults.xcresult > artifacts/stress-summary.json || true
+            xcrun xcresulttool get test-results tests --path StressResults.xcresult > artifacts/stress-tests.json || true
+            { echo; python3 scripts/summarize-xcresult.py artifacts/stress-summary.json artifacts/stress-tests.json \
+                --title "Stress run (flake detector)" --failures-only; } >> artifacts/test-summary.md || true
+          fi
+          if [ -f stress.log ]; then
+            # Swift Testing marks failures ✘ ("recorded an issue", "failed after … with N issues"); XCTest
+            # prints "error:" and "Test Case … failed". (Not plain "failed"/"error": test names contain them.)
+            echo "=== stress.log: failures, recorded issues and errors ==="
+            grep -n -E '✘|[Rr]ecorded an issue|Issue recorded|error:|Test Case .* failed|TEST .*FAILED|Fatal error' stress.log \
+              | head -200 || true
+          fi
           cat artifacts/test-summary.md >> "$GITHUB_STEP_SUMMARY" || true
           cat artifacts/test-summary.md || true
           cp xcodebuild.log stress.log artifacts/ 2>/dev/null || true

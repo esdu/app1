@@ -177,20 +177,26 @@ struct RecorderTests {
         await #expect(throws: RecorderError.nothingBuffered) { try await ticket.bundle() }
 
         // Control, same mode and same frames: without the audio input the writer emits segments. So the
-        // stall above is caused by the unfed audio input alone.
+        // stall above is caused by the unfed audio input alone. The frames are fed paced, as a camera
+        // feeds a writer that keeps up. A back-to-back burst into the real-time writer dropped a timing- and
+        // load-dependent number of frames, in the stress run once so many that no segment reached
+        // controlStart + 2 and the wait below timed out (the flake; DESIGN.md §5).
         var config = h.recorder.currentConfiguration
         config.audioEnabled = false
         config.appendWaitLimit = 10
         h.recorder.reconfigure(config)
         let controlStart = h.now
-        h.source.generate(seconds: 6)
+        try await h.generatePaced(seconds: 6)
+        #expect(abs(h.now - controlStart - 6) < 1e-6, "6 s of frames, one per step")
+        let lastFrame = h.now - 1 / Double(h.frameRate)
+        #expect(abs((h.recorder.status().latestMediaTime ?? -1) - lastFrame) < 1e-6,
+                "every paced frame is appended, none dropped; \(h.diagnostics)")
         try await h.waitForSegments(through: controlStart + 2)
-        guard !realTime else { return } // a real-time burst drops frames, so only count segments there
 
         // The fix as AppModel applies it: a writer without audio yields a clean, playable clip.
         try await h.waitForSegments(through: h.now - 2)
         #expect(h.recorder.status().bufferedSeconds >= 3)
-        let clip = try await h.saveClip(thenRecord: 2)
+        let clip = try await h.saveClip(thenRecord: 2, paced: true)
         let info = try await inspectClip(clip.url)
         #expect(info.duration >= 3, "duration \(info.duration)")
         expectHealthyClip(info, frameRate: h.frameRate, audio: false)

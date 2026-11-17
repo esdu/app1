@@ -61,16 +61,60 @@ final class RecorderHarness {
         let deadline = Date().addingTimeInterval(timeout)
         while (recorder.status().lastSegmentEnd ?? -.infinity) < t {
             if Date() > deadline {
-                throw TimeoutError(description: "no segment through \(t); last=\(String(describing: recorder.status().lastSegmentEnd))")
+                throw TimeoutError(description: "no segment through \(t); \(diagnostics)")
             }
             try await Task.sleep(for: .milliseconds(20))
         }
     }
 
-    /// Save with `postRoll`, keep "recording" `extra` seconds, then export.
-    func saveClip(postRoll: Double = 0, thenRecord extra: Double) async throws -> ExportedClip {
+    /// The recorder's state, for failure messages: enough to tell a halted, stalled or idle writer apart.
+    var diagnostics: String {
+        let s = recorder.status()
+        let q = recorder.fragmentQueue()
+        return "last segment end \(String(describing: s.lastSegmentEnd)), last video appended "
+            + "\(String(describing: s.latestMediaTime)), next frame \(now), segments \(s.segmentCount), "
+            + "generation \(s.generation), halt \(String(describing: s.halt)), error \(String(describing: s.lastError)), "
+            + "fragments queued \(q.count) (peak \(q.peakCount), admitted \(q.admitted), rejected \(q.rejected))"
+    }
+
+    /// Feeds `seconds` of frames the way a camera does to a writer that keeps up with it: each video frame
+    /// only once the writer's video input is ready for it. Use it with `realTime: true`. A real-time input
+    /// drops a frame it isn't ready for (`RollingRecorder.waitUntilReady`), and a back-to-back burst
+    /// (`source.generate`) outruns the encoder by however much the machine's load allows, so how many
+    /// frames survive, and so which segments exist, would vary from run to run. Paced, no frame is
+    /// dropped and the segments are the ones the offline writer produces.
+    func generatePaced(seconds: Double) async throws {
+        // As many frames as `source.generate(seconds:)` emits (counted, not compared with `now`, which only
+        // means something once the source's timeline has started). Each step asks for half a frame
+        // interval: exactly one video frame. (A whole interval sometimes yields two: the timeline is on the
+        // host clock's nanosecond timescale, where 1/15 s rounds to 66 666 666 or 66 666 667 ns.)
+        for _ in 0..<Int((seconds * Double(frameRate)).rounded()) {
+            try await waitUntilVideoInputReady()
+            source.generate(seconds: 0.5 / Double(frameRate))
+        }
+    }
+
+    /// Returns once the current writer's video input takes more data (at once if there is no writing
+    /// writer: the next frame starts one, or is handled as a writer failure).
+    func waitUntilVideoInputReady(timeout: Double = 30) async throws {
+        let deadline = Date().addingTimeInterval(timeout)
+        while let writer = recorder.activeWriter, writer.status == .writing,
+              let input = writer.inputs.first(where: { $0.mediaType == .video }), !input.isReadyForMoreMediaData {
+            if Date() > deadline {
+                throw TimeoutError(description: "the video input never became ready; \(diagnostics)")
+            }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+    }
+
+    /// Save with `postRoll`, keep "recording" `extra` seconds (`paced`: as `generatePaced`), then export.
+    func saveClip(postRoll: Double = 0, thenRecord extra: Double, paced: Bool = false) async throws -> ExportedClip {
         let ticket = recorder.beginSave(postRoll: postRoll)
-        source.generate(seconds: extra)
+        if paced {
+            try await generatePaced(seconds: extra)
+        } else {
+            source.generate(seconds: extra)
+        }
         let bundle = try await awaitBundle(ticket)
         defer { bundle.discard() }
         return try keep(try await ClipExporter.export(bundle))
@@ -89,7 +133,7 @@ final class RecorderHarness {
     func awaitBundle(_ ticket: SaveTicket, timeout: Double = 60) async throws -> SegmentBundle {
         let deadline = Date().addingTimeInterval(timeout)
         while !ticket.isFulfilled {
-            if Date() > deadline { throw TimeoutError(description: "save never completed") }
+            if Date() > deadline { throw TimeoutError(description: "save never completed; \(diagnostics)") }
             try await Task.sleep(for: .milliseconds(20))
         }
         return try await ticket.bundle()
