@@ -23,8 +23,9 @@ final class SystemDelayScheduler: DelayScheduler {
 
 /// Manual time for tests: nothing runs until `advance(by:)`, which runs every action that falls due,
 /// soonest first (ties in the order scheduled), including actions scheduled by those actions.
+/// It is also the tests' `MonotonicClock` (`seconds` is `now`), so measured time and timers agree.
 @MainActor
-final class FakeDelayScheduler: DelayScheduler {
+final class FakeDelayScheduler: DelayScheduler, MonotonicClock {
     private struct Item {
         let due: TimeInterval
         let order: Int
@@ -35,6 +36,8 @@ final class FakeDelayScheduler: DelayScheduler {
     private(set) var now: TimeInterval = 0
     private var items: [Item] = []
     private var counter = 0
+
+    var seconds: TimeInterval { now }
 
     /// Actions scheduled and not yet run.
     var pendingCount: Int { items.count }

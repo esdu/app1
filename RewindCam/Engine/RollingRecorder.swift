@@ -21,12 +21,17 @@ enum RecorderError: LocalizedError, Equatable {
     case nothingBuffered
     case alreadySaving
     case fileError(String)
+    /// A save waiting for its post-roll was settled because video stopped arriving (issue #9), and
+    /// no footage for it had been buffered.
+    case videoStopped
 
     var errorDescription: String? {
         switch self {
         case .nothingBuffered: "Nothing is buffered yet."
         case .alreadySaving: "Already saving a clip…"
         case .fileError(let why): "Storage error: \(why)"
+        case .videoStopped: "Nothing was saved: video stopped arriving before any footage for this clip was "
+            + "recorded. Save again once RewindCam shows REC."
         }
     }
 }
@@ -308,6 +313,18 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         return ticket
     }
 
+    /// Settles a save that is waiting for its post-roll now, with the segments already linked, or with
+    /// `RecorderError.videoStopped` if there are none (issue #9: frames stopped, so the post-roll would
+    /// never arrive). Recording itself is untouched. Does nothing if no save is pending; a ticket is
+    /// only ever fulfilled once.
+    func settlePendingSave() {
+        queue.sync {
+            guard let p = pending else { return }
+            resolveEarly(p, ifEmpty: .videoStopped)
+            publish()
+        }
+    }
+
     // MARK: AVAssetWriterDelegate
 
     func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData segmentData: Data,
@@ -515,11 +532,11 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
     }
 
     /// Interruption while a save is pending: hand over whatever was already captured.
-    private func resolveEarly(_ p: PendingSave) {
+    private func resolveEarly(_ p: PendingSave, ifEmpty error: RecorderError = .nothingBuffered) {
         if pending === p { pending = nil }
         if p.segments.isEmpty {
             p.bundle.discard()
-            p.ticket.fulfill(.failure(RecorderError.nothingBuffered))
+            p.ticket.fulfill(.failure(error))
         } else {
             p.ticket.fulfill(.success(p.bundle))
         }

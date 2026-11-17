@@ -28,6 +28,8 @@ struct AppEnvironment {
     /// On-device "save that" recogniser (nil where unsupported, e.g. UI tests).
     var voice: VoiceTrigger? = nil
     var clock: WallClock = SystemWallClock()
+    /// Interval timing for the frame watchdog (issue #9). Tests pass their `FakeDelayScheduler`.
+    var monotonicClock: MonotonicClock = HostMonotonicClock()
 
     static let uiTestArgument = "-UITestMode"
     /// With `-UITestMode`: the fake Photos library fails the first save, so the UI test can retry it.

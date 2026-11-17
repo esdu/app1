@@ -46,6 +46,13 @@ source, because the Simulator has no camera.*
   (at once, then backing off for about 30 s). If that doesn't work it stops, wakes the screen from Dim
   and shows "Not recording" with **Try Again**, instead of claiming to restart forever. A status
   check every 0.5 s also resumes recording if the camera came back without telling the app.
+- **Frame watchdog**: if no new video frame reaches the buffer for 5 s while the app says it is
+  recording (sound still arriving doesn't count), or frames arrive but nothing is written for 5 s, it
+  says so ("No new video for 5 s. Restarting the camera…") and restarts the camera once. If that
+  brings recording back, an orange banner says when the camera was restarted and that the footage from
+  before is gone; if video stops again, it stops, wakes the screen from Dim and shows "Not recording"
+  with **Try Again**. A save waiting for its post-roll is finished at once with the footage there is
+  (the toast says the clip ends early), or fails with a message saying to save again.
 - **Orphan cleanup**: leftover buffer files and half-written exports from a crash or kill are removed
   on launch. Finished clips that didn't reach Photos are kept.
 - **Voice trigger** (optional, off by default): say "save that". Recognition is **on-device
@@ -74,6 +81,9 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
 - A Save resolves when the segment containing the tap is complete, about 1 s after the tap
   (plus any post-roll). The clip still ends exactly at the tap.
 - Only one save can be pending at a time. A second tap during post-roll says "Already saving".
+- The frame watchdog notices a stall 5 to 5.5 s after the last new frame; footage from before its
+  restart is cleared like any other restart. It is tested with the synthetic source only: whether a
+  real `AVCaptureSession` ever stalls this way, and whether a stop and start fixes it, is not verified.
 - **Clips that didn't reach Photos** take their full size in the app's storage until a Retry succeeds.
   There is no in-app way to delete or share them yet; allow Photos access and tap Retry.
   (A small in-app list for them is proposed in [docs/decisions/clip-library.md](docs/decisions/clip-library.md).)
@@ -145,6 +155,11 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       camera can't restart within about 30 s, the screen wakes and shows "Not recording" with
       **Try Again**, which starts recording. It never stays on "Camera error … Restarting…" with the
       counter at 0 s.
+- [ ] **Frame watchdog**: hard to provoke on purpose. During long Dim sessions (and the media-services
+      reset above), the app must never show "REC" with the buffer counter frozen for more than about
+      5 s: it either recovers by itself (orange "The camera was restarted" banner with the time) or wakes
+      the screen with "Not recording" and **Try Again**. A save made while it happens finishes with a
+      clip (toast "It ends early") or a message, never a toast that stays on "Saving…".
 - [ ] **Thermal**: warm the phone (4K60, in the sun, while charging). At "serious" the orange banner shows
       and the preset label drops; when the phone cools it returns to your setting.
 - [ ] **2-hour session**: Dim on, unplugged. Recording is still running after 2 h, the screen never

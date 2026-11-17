@@ -58,6 +58,8 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     private let stateBox = Locked(CaptureRunState.stopped) // a lock, so the main actor never waits on `queue`
     private var resumeFailuresLeft = 0
     private var resumes = 0
+    /// Video frames are produced on the timeline but never reach the sink (issue #9); audio still does.
+    private var videoWithheld = false
 
     static let audioSampleRate: Int32 = 48_000
     static let audioChunk = 1_024
@@ -224,6 +226,14 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
         queue.sync { stateBox.withLock { $0 = newState } }
     }
 
+    /// A camera that still "runs" but stops delivering video (issue #9, the frame watchdog's case):
+    /// while `withheld`, video frames keep their place on the timeline but never reach the sink, while
+    /// audio (if any) still does. `runState` is unchanged and no event is emitted. Survives restarts,
+    /// like a broken capture pipeline; pass `false` to let frames through again.
+    func withholdVideo(_ withheld: Bool) {
+        queue.sync { videoWithheld = withheld }
+    }
+
     // MARK: - Private (on `queue`)
 
     private var frameDuration: CMTime { CMTime(value: 1, timescale: CMTimeScale(format.frameRate)) }
@@ -287,7 +297,7 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
             let videoDue = v < end
             if !audioDue && !videoDue { break }
             if videoDue && (!audioDue || v <= a) {
-                if let sb = makeVideoSample(pts: v) {
+                if !videoWithheld, let sb = makeVideoSample(pts: v) {
                     sinkBox.current.sink?.consume(sb, kind: .video)
                 }
                 videoCount += 1

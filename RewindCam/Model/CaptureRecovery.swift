@@ -2,20 +2,30 @@ import Foundation
 
 /// Why `AppModel.recoverCapture(_:)` was called (issue #4). Every reason gets the same recovery: the
 /// recorder is suspended, the phase says what happened and that a restart is under way, and the source
-/// is asked to run again (`FrameSource.resumeRunning()`) on the `RestartBackoff` schedule until it
-/// does, or until the budget is spent and the app shows "Not recording" with Try Again.
+/// is restarted (`AppModel.restartSource(for:)`) on the `RestartBackoff` schedule until it runs, or
+/// until the budget is spent and the app shows "Not recording" with Try Again.
 enum CaptureRecoveryReason: Equatable, Sendable {
     /// The source reported a runtime error (`AVCaptureSession.runtimeErrorNotification`).
     case runtimeError(String)
     /// The status-loop safety net found the source stopped while the app means to record, with no
     /// interruption reported (`AppModel.reconcileCapture()`).
     case sourceStopped
+    /// The frame watchdog (issue #9) saw no progress while recording, although the source says it runs.
+    /// Restarted with a full stop and start, not `resumeRunning()` (which would find it "running").
+    case stalled(FrameWatchdog.Stall)
+
+    var isStall: Bool {
+        if case .stalled = self { return true }
+        return false
+    }
 
     /// The paused-phase message while recovery runs.
     var pausedMessage: String {
         switch self {
         case .runtimeError(let why): InterruptionReason.runtimeError(why).message
         case .sourceStopped: "The camera stopped. Restarting…"
+        case .stalled(.noVideo): "No new video for \(Int(FrameWatchdog.timeout)) s. Restarting the camera…"
+        case .stalled(.noSegments): "Video isn't reaching the buffer. Restarting the camera…"
         }
     }
 
@@ -24,6 +34,8 @@ enum CaptureRecoveryReason: Equatable, Sendable {
         switch self {
         case .runtimeError(let why): why
         case .sourceStopped: "it stopped unexpectedly"
+        case .stalled(.noVideo): "no new video arrived for \(Int(FrameWatchdog.timeout)) s"
+        case .stalled(.noSegments): "video stopped reaching the buffer"
         }
     }
 }
@@ -39,6 +51,13 @@ struct RestartBackoff: Equatable, Sendable {
 
     /// Attempts handed out so far.
     private(set) var attempts = 0
+
+    /// A budget with no attempts left: the recovery gives up at once (a repeated frame stall, #9).
+    static var spent: RestartBackoff {
+        var backoff = RestartBackoff()
+        backoff.attempts = delays.count
+        return backoff
+    }
 
     /// True once every attempt has been handed out.
     var isExhausted: Bool { attempts >= Self.delays.count }
