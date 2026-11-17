@@ -61,10 +61,20 @@ final class RecorderHarness {
         let deadline = Date().addingTimeInterval(timeout)
         while (recorder.status().lastSegmentEnd ?? -.infinity) < t {
             if Date() > deadline {
-                throw TimeoutError(description: "no segment through \(t); last=\(String(describing: recorder.status().lastSegmentEnd))")
+                throw TimeoutError(description: "no segment through \(t); \(diagnostics)")
             }
             try await Task.sleep(for: .milliseconds(20))
         }
+    }
+
+    /// The recorder's state, for failure messages: enough to tell a halted, stalled or idle writer apart.
+    var diagnostics: String {
+        let s = recorder.status()
+        let q = recorder.fragmentQueue()
+        return "last segment end \(String(describing: s.lastSegmentEnd)), last video appended "
+            + "\(String(describing: s.latestMediaTime)), next frame \(now), segments \(s.segmentCount), "
+            + "generation \(s.generation), halt \(String(describing: s.halt)), error \(String(describing: s.lastError)), "
+            + "fragments queued \(q.count) (peak \(q.peakCount), admitted \(q.admitted), rejected \(q.rejected))"
     }
 
     /// Save with `postRoll`, keep "recording" `extra` seconds, then export.
@@ -89,7 +99,7 @@ final class RecorderHarness {
     func awaitBundle(_ ticket: SaveTicket, timeout: Double = 60) async throws -> SegmentBundle {
         let deadline = Date().addingTimeInterval(timeout)
         while !ticket.isFulfilled {
-            if Date() > deadline { throw TimeoutError(description: "save never completed") }
+            if Date() > deadline { throw TimeoutError(description: "save never completed; \(diagnostics)") }
             try await Task.sleep(for: .milliseconds(20))
         }
         return try await ticket.bundle()
