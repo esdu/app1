@@ -72,25 +72,6 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             2>&1 | tee xcodebuild.log | { if command -v xcbeautify >/dev/null; then xcbeautify --renderer github-actions; else cat; fi; }
 
-      - name: TEMP load repro
-        if: always()
-        continue-on-error: true
-        run: |
-          rc=0
-          xcodebuild test-without-building \
-            -project RewindCam.xcodeproj \
-            -scheme RewindCam \
-            -destination "id=${{ steps.sim.outputs.udid }}" \
-            -only-testing:RewindCamTests/TempBurstRepro \
-            -resultBundlePath LoadRepro.xcresult \
-            -parallel-testing-enabled NO \
-            CODE_SIGNING_ALLOWED=NO > load.log 2>&1 || rc=$?
-          grep -n -i -E 'TEMPDIAG|recorded an issue|failed|passed after|error' load.log | head -120 || true
-          xcrun xcresulttool get test-results summary --path LoadRepro.xcresult > load-summary.json || true
-          xcrun xcresulttool get test-results tests --path LoadRepro.xcresult > load-tests.json || true
-          python3 scripts/summarize-xcresult.py load-summary.json load-tests.json --title "TEMP load repro" || true
-          exit $rc
-
       - name: Stress unit tests (flake detector)
         # Re-runs the unit tests (not UI tests) a few times on the already-built products,
         # to catch intermittent crashes or timing-dependent failures.
