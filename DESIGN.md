@@ -363,14 +363,90 @@ running but the recorder suspended or the phase paused → resume; interrupted w
 stopped while recording or paused, with no recovery running → `recoverCapture(.sourceStopped)`. It
 does nothing while pipeline work runs or capture isn't wanted. The frame watchdog runs right after it.
 
-**For explicit user pause (#15):** every automatic path (event application, `recoverCapture`,
-recovery timers and attempts, the safety net) checks `automaticCaptureAllowed`, today `wantsRunning`.
-A user pause belongs in that property, not in a second event stream or restart path.
+**User pause (#15):** every automatic path (event application, `recoverCapture`, recovery timers and
+attempts, the safety net, the frame watchdog, the free-space check) checks `automaticCaptureAllowed`,
+which is `wantsRunning && !isUserPaused`; "User pause" below adds capture generations on top. There
+is still one event stream and one restart path.
 
 `SyntheticFrameSource` simulates all of it: `simulateRuntimeError(_:sessionStops:)` (case (a): the
 session keeps running; (b): it stops), `setResumeFailures(n)` (the next n restarts fail),
 `setRunStateSilently(_:)` (a missed notification), `resumeCount`. Not covered by CI: whether a real
 `AVCaptureSession` after a runtime error or a media-services reset behaves as modelled (README checklist).
+
+### User pause (issue #15)
+
+RewindCam still starts recording on launch and resumes on its own when it returns to the foreground.
+On top of that the user can **Pause** (the capsule above Save) and **Resume**. An explicit pause is
+authoritative: nothing automatic ends it, only Resume.
+
+* **Intent.** `wantsRunning` is the lifecycle's wish (false in the background); `isUserPaused` is the
+  user's. `automaticCaptureAllowed` = `wantsRunning && !isUserPaused` gates every automatic path, and
+  `start()` itself does nothing while paused, so launch-time `.active`, foreground, Try Again
+  (`retryStart`) and the out-of-space settings retry can't override it. `Phase.userPaused` is a phase
+  of its own, distinct from `.paused(reason)` (an interruption iOS ends, or a recovery under way):
+  badge "PAUSED" with a pause icon (VoiceOver: "Paused by you"), and a blue `AppNotice`
+  (`userPausedNotice`) saying the camera is off, the unsaved buffer was discarded, saved clips and
+  clips waiting for Photos are kept, and that it lasts until Resume. `tearDown` keeps `.userPaused`
+  when the app is backgrounded while paused, so the trip doesn't turn it into "Paused — iOS can't
+  record in the background".
+* **Pause** (`pauseCapture()`) does everything that matters synchronously, before any `await`: bumps
+  the capture generation, ends any recovery (its timers then find no current recovery), disarms the
+  frame watchdog, clears the stall and disk notices, stops the voice trigger, suspends the recorder
+  (the rolling buffer is deleted; a save waiting for its post-roll is settled with what is there and
+  its export carries on), wakes the screen from Dim, re-enables the idle timer and sets `.userPaused`.
+  Then it queues `tearDown` on the pipeline, which stops the source after whatever session work is
+  running. If footage is buffered the button asks first ("Pause recording?": the last N s haven't been
+  saved and will be discarded; saved clips are kept).
+* **Generations.** `captureGeneration` is bumped by every change of intent: `start()`, `stop()`,
+  `pauseCapture()`, `resumeCapture()`. `bringUp(generation)` checks `isCurrent(generation)` (current
+  generation *and* `automaticCaptureAllowed`) before it starts and after every `await`: after the
+  free-space stop, after `FrameSource.start` returns (for the camera that includes the permission
+  prompt) and after it throws. A stale start publishes nothing (not `.recording`, not `.cameraDenied`,
+  no voice trigger, no Photos prompt, no idle-timer change) and stops what it started
+  (`stopCapture()`); the newer intent's own work is already queued behind it. A recovery records the
+  generation it began in, and `isCurrentRecovery(id)` (same id, current generation, capture allowed)
+  is checked by every backoff timer, before an attempt, after its restart returns, and by the give-up.
+  `startFailed` and `stopForResources` (low disk, recorder halt #14) re-check `automaticCaptureAllowed`
+  after their `await`, so a pause that lands while they stop the source keeps its phase. The voice
+  trigger's authorization callback is already guarded by `voiceSession`, which every stop (a pause
+  included) bumps.
+* **Serialized.** Pause, Resume, background and foreground only queue pipeline work, which runs one
+  piece at a time, so rapid toggling settles on the newest intent: stale starts are skipped at their
+  first check or undone at their second, and only one session start is in flight at any moment.
+  `tearDown` shows `.starting` rather than `.idle` when a start is queued behind it.
+* **Late events.** Interruption ends, runtime errors and what the safety net sees while paused update
+  `sourceInterruption` at most; `applySourceState`, `recoverCapture` and `reconcileCapture` return
+  early. Resume starts afresh (`bringUp` clears `sourceInterruption`). The frame watchdog stays disarmed
+  while paused and re-arms on the first status tick after Resume, with that moment as its baseline and
+  a fresh stall budget (`start()` calls `forgetStalls()`). The free-space check doesn't read while
+  paused; Resume checks free space like a launch and may show the out-of-space notice.
+* **Controls.** Save (button, volume buttons, voice) goes through `save(trigger:)`, which refuses while
+  `saveUnavailableReason` is non-nil: "Recording is paused. Tap Resume to record again." The button is
+  disabled with that hint; the volume buttons and a stale voice callback get a "Can't save" toast and
+  the failure haptic. Dim is disabled while paused (`setDimmed(true)` is ignored): nothing is recorded,
+  so the screen should be allowed to lock. Settings changes and thermal steps while paused start
+  nothing. Retry for clips waiting for Photos keeps working. The preview is black while paused
+  (`PreviewSurface`), so a frozen last frame can't pass for a live picture.
+* **Not persisted across relaunch.** The pause lives in memory. A relaunch (including after iOS ends
+  the app in the background) records as before: issue #15 keeps the launch and foreground defaults and
+  rules out persisting a new default recording mode, and a persisted pause would turn a cold launch
+  into a stopped camera the user may not notice, the opposite of the app's job of having the last
+  moments ready. Within the running app the banner says it lasts "until you tap Resume"; README's
+  known limits say that a relaunch records again.
+
+Tests (`UserPauseTests.swift`, harness time, no sleeps): `SyntheticFrameSource.holdNextStart()` holds
+the next `start` (as a permission prompt or slow start would) until `releaseHeldStart()`, with
+`waitForHeldStart()` to know it is waiting. Covered: pause stops everything and refuses Save from
+every trigger while kept clips stay; the pause holds across inactive/active, a Settings round trip,
+Try Again, `start()` and 30 s of ticks; pause during a pending start, during a permission prompt
+answered "Don't Allow" or "Allow" afterwards; background during a pending start (default behaviour
+kept); rapid pause/resume/background/foreground; pause during recovery backoff and during a stall
+restart's start (the watchdog re-arms after Resume); interruption ended while paused; Try Again
+queued just before Pause; a low-disk stop queued just before Pause; no persistence across a relaunch.
+UI test `testPauseHoldsAcrossBackgroundUntilResume`: Pause, confirm, banner and disabled Save, to the
+Settings app and back, still paused, Resume, REC, Save. Not covered by CI: the real camera permission
+prompt and real interruption timing around a pause, and the volume buttons while paused (README
+checklist).
 
 ### Frame watchdog (issue #9)
 
@@ -433,8 +509,9 @@ recorder's `RecorderStatus` on every status tick by `AppModel.checkFrameWatchdog
   is gone; it clears once the buffer is full again, or when capture stops or restarts from the user.
   The successful restart doesn't wake the screen (unattended use); giving up does.
 * **User pause (#15).** The watchdog only runs while `automaticCaptureAllowed`, and its recovery goes
-  through `recoverCapture`, whose timers and attempts check it too, so an explicit pause there stops
-  the watchdog and any stall recovery without further changes.
+  through `recoverCapture`, whose timers and attempts check it too. Pause also disarms it at once and
+  ends any stall recovery, and a stall restart whose start completes after Pause is dropped (see
+  "User pause"). After Resume it re-arms on the first tick with a fresh baseline and stall budget.
 
 `SyntheticFrameSource.withholdVideo(_:)` simulates the stall: frames keep their place on the timeline
 but never reach the sink, audio still does, and `runState` stays `.running`. Tests:

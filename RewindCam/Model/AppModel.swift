@@ -40,6 +40,10 @@ final class AppModel {
         /// Not enough free space to keep the buffer (issue #10): capture didn't start, or stopped when
         /// free space fell below the reserve. See `startFailureNotice` and `DiskSpacePolicy`.
         case outOfSpace(DiskSpaceCheck)
+        /// The user tapped Pause (issue #15): the camera is off and the unsaved buffer discarded until
+        /// they tap Resume. Unlike `.paused` (an interruption iOS ends, or a recovery under way) nothing
+        /// automatic leaves this phase: not the foreground, not a late source event, not a timer.
+        case userPaused
 
         /// The last start attempt failed (or capture stopped for lack of space); nothing is captured
         /// until a start succeeds: Try Again, the foreground re-check, or (out of space) a settings change.
@@ -85,6 +89,9 @@ final class AppModel {
     /// Set when an automatic restart after a frame stall (issue #9) brought recording back; drives
     /// `stallNotice` until the buffer has refilled or capture stops. nil otherwise.
     private(set) var recoveredStall: RecoveredStall?
+    /// The user paused capture (issue #15; `pauseCapture()`): only `resumeCapture()` clears it. Not
+    /// persisted: a relaunch starts recording as before (DESIGN.md "User pause").
+    private(set) var isUserPaused = false
     /// The last free-space check while capture runs (issue #10); drives `diskSpaceNotice`. nil when
     /// capture isn't running.
     private(set) var diskSpace: DiskSpaceCheck?
@@ -105,6 +112,8 @@ final class AppModel {
         /// Identifies this recovery, so a backoff timer or attempt from an earlier one does nothing.
         let id: Int
         let reason: CaptureRecoveryReason
+        /// The capture generation it was started in (`captureGeneration`); a newer one supersedes it.
+        let generation: Int
         var backoff = RestartBackoff()
     }
 
@@ -132,6 +141,11 @@ final class AppModel {
     @ObservationIgnored private var toastTask: Task<Void, Never>?
     @ObservationIgnored private var savedBrightness: CGFloat?
     @ObservationIgnored private var wantsRunning = false
+    /// Capture generation (issue #15): bumped by every change of intent -- `start()`, `stop()`,
+    /// `pauseCapture()`, `resumeCapture()`. Work queued for one generation (a start, a reconfigure, a
+    /// recovery) checks it after every `await` (`isCurrent(_:)`), so a completion that arrives after a
+    /// pause, a background or a newer start publishes nothing and leaves no session running.
+    @ObservationIgnored private(set) var captureGeneration = 0
     @ObservationIgnored private var didCleanUp = false
     @ObservationIgnored private var didRequestPhotosAccess = false
     /// Kept clips a save is still handing to Photos; hidden from `unsavedClips` so Retry can't race it.
@@ -391,6 +405,26 @@ final class AppModel {
                          severity: .warning, action: nil)
     }
 
+    /// Shown while the user has paused (issue #15): that nothing is recorded, that the unsaved buffer was
+    /// discarded and saved clips are kept, and that it stays paused until Resume. No action: the Resume
+    /// button sits where Pause was, next to Save.
+    var userPausedNotice: AppNotice? {
+        guard phase == .userPaused else { return nil }
+        return AppNotice(id: "userPausedBanner", systemImage: "pause.circle.fill",
+                         title: "Paused: the camera is off",
+                         message: "Nothing is being recorded, and the unsaved buffer was discarded. "
+                             + "Clips you saved, and clips waiting for Photos, are kept. RewindCam stays "
+                             + "paused, also when you leave and come back, until you tap Resume.",
+                         severity: .info, action: nil)
+    }
+
+    /// What Pause discards, for the confirmation before it (issue #15). nil when nothing is buffered.
+    var pauseDiscardWarning: String? {
+        guard phase == .recording, readySeconds > 0 else { return nil }
+        return "The last \(readySeconds) s haven't been saved and will be discarded. Clips you saved, "
+            + "and clips waiting for Photos, are kept. Recording stays off until you tap Resume."
+    }
+
     /// Why Save can't do anything right now (nil while recording: nothing is buffered in any other
     /// phase). The Save button is disabled and says this in its accessibility hint; a save from the
     /// volume buttons shows it as a toast.
@@ -402,6 +436,7 @@ final class AppModel {
         case .cameraDenied: "Camera access is off, so nothing is being recorded."
         case .failed: "The camera isn't running, so nothing is being recorded."
         case .outOfSpace: "There isn't enough free space to record."
+        case .userPaused: "Recording is paused. Tap Resume to record again."
         }
     }
 
@@ -414,17 +449,62 @@ final class AppModel {
 
     // MARK: Lifecycle
 
+    /// Launch, foreground, Try Again and Resume. Does nothing while the user has paused (issue #15):
+    /// only `resumeCapture()` clears that, then comes here.
     func start() {
+        guard !isUserPaused else { return }
         wantsRunning = true
+        captureGeneration += 1
+        let generation = captureGeneration
         // Launch, foreground or Try Again: a fresh session, with a fresh stall budget (issue #9).
         frameWatchdog.forgetStalls()
         recoveredStall = nil
-        schedulePipeline { model in await model.bringUp() }
+        schedulePipeline { model in await model.bringUp(generation) }
     }
 
     func stop(reason: InterruptionReason? = nil) {
         wantsRunning = false
+        captureGeneration += 1
         schedulePipeline { model in await model.tearDown(reason: reason) }
+    }
+
+    // MARK: User pause (issue #15; DESIGN.md "User pause")
+
+    /// **Pause** (issue #15): the user turns capture off until they tap Resume. Everything automatic
+    /// stops at once, before any `await`: the generation moves on (a start, reconfigure or restart still
+    /// running publishes nothing and stops what it started), recovery and its timers end, the frame
+    /// watchdog is disarmed, the voice trigger stops, the recorder is suspended (the unsaved buffer is
+    /// discarded; a save waiting for its post-roll gets what is there), the screen wakes from Dim and may
+    /// lock again. The source is stopped on the pipeline, after whatever is running there.
+    func pauseCapture() {
+        guard !isUserPaused else { return }
+        isUserPaused = true
+        wantsRunning = false
+        captureGeneration += 1
+        endRecovery()
+        frameWatchdog.disarm()
+        recoveredStall = nil
+        diskSpace = nil
+        sourceInterruption = nil
+        activeCapture = nil
+        appliedCapture = nil
+        stopVoice()
+        recorder.suspend()
+        setDimmed(false)
+        environment.screen.setIdleTimerDisabled(false)
+        previewImage = nil
+        phase = .userPaused
+        refreshStatus()
+        schedulePipeline { model in await model.tearDown(reason: nil) }
+    }
+
+    /// **Resume** (issue #15): clears the pause and starts like a launch (a fresh generation, stall
+    /// budget and free-space check).
+    func resumeCapture() {
+        guard isUserPaused else { return }
+        isUserPaused = false
+        phase = .starting
+        start()
     }
 
     /// Awaits all queued start/stop/restart work (tests).
@@ -457,6 +537,7 @@ final class AppModel {
             // Not running (launch, back from the background), or the last start failed: start again.
             // The failed case is how "allowed the camera in Settings and came back" recovers when iOS
             // doesn't background the app in between (e.g. a permission prompt was just answered).
+            // An explicit pause (#15) holds: `start()` does nothing until Resume.
             if !wantsRunning || self.phase.isStartFailure { start() }
         case .background:
             setDimmed(false)
@@ -470,7 +551,7 @@ final class AppModel {
     /// same pipeline as launch and foreground; ignored unless the last start failed, so a double tap
     /// queues only one attempt.
     func retryStart() {
-        guard phase.isStartFailure else { return }
+        guard phase.isStartFailure, !isUserPaused else { return }
         phase = .starting
         start()
     }
@@ -511,7 +592,7 @@ final class AppModel {
         let effective = QualityGovernor.effectivePreset(user: settings.preset, thermal: thermalLevel)
         thermalMessage = QualityGovernor.message(user: settings.preset, effective: effective, thermal: thermalLevel)
         activePreset = effective
-        if wantsRunning, case .outOfSpace = phase {
+        if automaticCaptureAllowed, case .outOfSpace = phase {
             // Stopped for lack of space: a shorter buffer or lower quality may fit now (issue #10).
             recorder.reconfigure(recorderConfiguration)
             refreshStatus()
@@ -519,17 +600,18 @@ final class AppModel {
             return
         }
         let capture = captureConfiguration
-        if wantsRunning, let applied = appliedCapture, applied != capture {
+        if automaticCaptureAllowed, let applied = appliedCapture, applied != capture {
+            let generation = captureGeneration
             schedulePipeline { model in
                 await model.tearDown(reason: nil)
-                await model.bringUp()
+                await model.bringUp(generation)
             }
         } else {
             // Buffer length changes apply in place without losing footage.
             recorder.reconfigure(recorderConfiguration)
             // A longer buffer is checked like a start (issue #10): it must fit next to what the ring
             // already holds, or recording stops with the out-of-space notice instead of filling the disk.
-            if wantsRunning, phase == .recording, pipelineDepth == 0 {
+            if automaticCaptureAllowed, phase == .recording, pipelineDepth == 0 {
                 let ringBytes = recorder.status().bytes
                 let check = diskPolicy.beforeBuffering(availableBytes: readDiskSpace().map { $0 + ringBytes })
                 if check.level == .tooLow {
@@ -777,8 +859,10 @@ final class AppModel {
 
     // MARK: Dim mode
 
+    /// Dim is for long recording sessions; while the user has paused (#15) nothing records and the screen
+    /// may lock, so dimming is refused (the button is disabled) and pausing wakes the screen.
     func setDimmed(_ dimmed: Bool) {
-        guard dimmed != isDimmed else { return }
+        guard dimmed != isDimmed, !(dimmed && isUserPaused) else { return }
         isDimmed = dimmed
         if dimmed {
             savedBrightness = environment.screen.brightness
@@ -823,14 +907,23 @@ final class AppModel {
         }
     }
 
-    private func bringUp() async {
+    /// True while `generation` is the newest intent and that intent is to capture (issue #15).
+    private func isCurrent(_ generation: Int) -> Bool {
+        generation == captureGeneration && automaticCaptureAllowed
+    }
+
+    /// Starts capture for `generation` (`start()`, or a reconfigure in `applyQuality`). After each
+    /// `await` it checks the generation is still current: a pause, background or newer start while the
+    /// camera starts (or a permission prompt is up) makes this start stale, and a stale start publishes
+    /// no phase -- not `.recording`, not `.cameraDenied` -- and stops whatever it started.
+    private func bringUp(_ generation: Int) async {
         if !didCleanUp {
             // Removes the old buffer, job folders and partial exports; finished clips are kept.
             orphansRemoved = environment.storage.removeOrphans()
             didCleanUp = true
             reloadUnsavedClips()
         }
-        guard wantsRunning else { return }
+        guard isCurrent(generation) else { return }
         phase = .starting
         // A fresh start supersedes any recovery and anything the previous session reported.
         endRecovery()
@@ -843,6 +936,7 @@ final class AppModel {
         let space = diskPolicy.beforeBuffering(availableBytes: readDiskSpace())
         guard space.level != .tooLow else {
             await stopCapture()
+            guard isCurrent(generation) else { return }
             phase = .outOfSpace(space)
             refreshStatus()
             return
@@ -850,6 +944,13 @@ final class AppModel {
         diskSpace = space
         do {
             let active = try await environment.source.start(capture)
+            guard isCurrent(generation) else {
+                // Superseded while the camera started: the newer intent owns the phase. Its own work
+                // (a pause's or background's tear-down, a newer start) is queued behind this one.
+                await stopCapture()
+                refreshStatus()
+                return
+            }
             activeCapture = active
             appliedCapture = capture
             recorder.reconfigure(recorderConfiguration)
@@ -861,7 +962,8 @@ final class AppModel {
             batteryDrain.reset(configuration: measuredConfiguration)
             requestPhotosAccessOnce()
         } catch {
-            await startFailed(error)
+            // A denial answered after a pause is not news: nothing is meant to run.
+            if isCurrent(generation) { await startFailed(error) } else { await stopCapture() }
         }
         refreshStatus()
     }
@@ -871,6 +973,8 @@ final class AppModel {
     /// (`retryStart`) or the foreground re-check in `scenePhaseChanged(.active)`.
     private func startFailed(_ error: Error) async {
         await stopCapture()
+        // A pause or stop while the source stopped owns the phase now (issue #15).
+        guard automaticCaptureAllowed else { return }
         if let error = error as? FrameSourceError, error == .cameraAccessDenied {
             phase = .cameraDenied
         } else {
@@ -908,7 +1012,13 @@ final class AppModel {
         appliedCapture = nil
         activeCapture = nil
         environment.screen.setIdleTimerDisabled(false)
-        phase = reason.map { .paused($0.message) } ?? .idle
+        if isUserPaused {
+            phase = .userPaused // issue #15: also when the app is backgrounded while paused
+        } else if wantsRunning {
+            phase = .starting // a start queued behind this stop (reconfigure, Resume, back in the foreground)
+        } else {
+            phase = reason.map { .paused($0.message) } ?? .idle
+        }
         refreshStatus()
     }
 
@@ -919,10 +1029,12 @@ final class AppModel {
     //   user pause #15) read or extend this, they don't add a second stream.
     // * One recovery entry point: `recoverCapture(_:)`. Callers: a runtime-error event, the status-loop
     //   safety net (`reconcileCapture()`), and the frame watchdog (#9, `checkFrameWatchdog()`).
-    // * Every automatic path checks `automaticCaptureAllowed`; #15's explicit pause belongs there.
+    // * Every automatic path checks `automaticCaptureAllowed`, which is false while the user has paused
+    //   (#15); work queued for an older capture generation checks `isCurrent(_:)` as well.
 
-    /// Whether automatic paths (event handling, recovery, the safety net) may bring capture back.
-    private var automaticCaptureAllowed: Bool { wantsRunning }
+    /// Whether automatic paths (event handling, recovery, the safety net, the frame watchdog, the
+    /// free-space check) may bring capture back: capture is wanted and the user hasn't paused (#15).
+    private var automaticCaptureAllowed: Bool { wantsRunning && !isUserPaused }
 
     private func handle(_ event: FrameSourceEvent) {
         handledSourceEvents += 1
@@ -949,7 +1061,7 @@ final class AppModel {
         guard automaticCaptureAllowed else { return }
         switch phase {
         case .recording, .paused, .starting: break
-        case .idle, .cameraDenied, .failed, .outOfSpace: return
+        case .idle, .cameraDenied, .failed, .outOfSpace, .userPaused: return
         }
         switch sourceInterruption {
         case .runtimeError(let why)?:
@@ -982,7 +1094,7 @@ final class AppModel {
         guard automaticCaptureAllowed else { return }
         switch phase {
         case .recording, .paused, .starting: break
-        case .idle, .cameraDenied, .failed, .outOfSpace: return
+        case .idle, .cameraDenied, .failed, .outOfSpace, .userPaused: return
         }
         recorder.suspend()
         frameWatchdog.disarm()
@@ -992,12 +1104,19 @@ final class AppModel {
         // A frame stall gets `FrameWatchdog.automaticRestartsPerStall` restarts per episode; after that
         // the recovery starts with a spent budget, i.e. gives up at once through the usual path.
         let budget = reason.isStall && !frameWatchdog.mayRestartAutomatically ? RestartBackoff.spent : RestartBackoff()
-        recovery = CaptureRecovery(id: recoveryCounter, reason: reason, backoff: budget)
+        recovery = CaptureRecovery(id: recoveryCounter, reason: reason, generation: captureGeneration, backoff: budget)
         scheduleRecoveryAttempt()
     }
 
     private func endRecovery() {
         recovery = nil // pending timers and attempts see a different id and do nothing
+    }
+
+    /// True while recovery `id` is the one running, in the current generation, and capture may run.
+    /// Every backoff timer and attempt checks this, before and after each `await` (issue #15).
+    private func isCurrentRecovery(_ id: Int) -> Bool {
+        guard let recovery, recovery.id == id else { return false }
+        return isCurrent(recovery.generation)
     }
 
     /// Queues the next attempt on the pipeline after its backoff delay; gives up when the budget is spent.
@@ -1013,7 +1132,7 @@ final class AppModel {
             schedulePipeline { model in await model.attemptRecovery(id) }
         } else {
             environment.scheduler.schedule(after: delay) { [weak self] in
-                guard let self, self.recovery?.id == id else { return }
+                guard let self, self.isCurrentRecovery(id) else { return }
                 self.schedulePipeline { model in await model.attemptRecovery(id) }
             }
         }
@@ -1054,10 +1173,11 @@ final class AppModel {
     }
 
     private func attemptRecovery(_ id: Int) async {
-        guard let current = recovery, current.id == id, automaticCaptureAllowed else { return }
+        guard isCurrentRecovery(id), let current = recovery else { return }
         let running = await restartSource(for: current.reason)
-        // A stop, a new start or an ordinary interruption may have superseded this recovery meanwhile.
-        guard recovery?.id == id, automaticCaptureAllowed else { return }
+        // A pause, stop, new start or ordinary interruption may have superseded this recovery meanwhile.
+        // Then what the restart started is left to the tear-down or start queued behind this attempt.
+        guard isCurrentRecovery(id) else { return }
         if running {
             // Its `.interruptionEnded` is in the channel too; applying it here as well means the
             // outcome doesn't depend on which of the two is handled first.
@@ -1076,7 +1196,7 @@ final class AppModel {
     /// Restarts didn't bring capture back: stop it and say so truthfully, with Try Again (issue #8's
     /// `.failed` notice). Wakes the screen from Dim so the notice can be seen.
     private func giveUpRecovery(_ id: Int) async {
-        guard let current = recovery, current.id == id, automaticCaptureAllowed else { return }
+        guard isCurrentRecovery(id), let current = recovery else { return }
         setDimmed(false)
         environment.haptics.failure()
         recorder.suspend()
@@ -1202,12 +1322,13 @@ final class AppModel {
         guard automaticCaptureAllowed else { return }
         switch phase {
         case .recording, .paused, .starting: break
-        case .idle, .cameraDenied, .failed, .outOfSpace: return
+        case .idle, .cameraDenied, .failed, .outOfSpace, .userPaused: return
         }
         recorder.suspend()
         setDimmed(false)
         environment.haptics.failure()
         await stopCapture()
+        guard automaticCaptureAllowed else { return } // paused or stopped meanwhile (#15)
         phase = stoppedPhase
         refreshStatus()
     }
@@ -1258,7 +1379,7 @@ final class AppModel {
     // MARK: Voice trigger
 
     private func startVoiceIfNeeded() {
-        guard settings.voiceTriggerEnabled, phase == .recording, !isVoiceListening,
+        guard settings.voiceTriggerEnabled, phase == .recording, automaticCaptureAllowed, !isVoiceListening,
               let voice = environment.voice else { return }
         guard voice.isAvailable else {
             showToast("Voice trigger needs on-device speech recognition, which this iPhone doesn't support.", isError: true)
@@ -1272,6 +1393,7 @@ final class AppModel {
         let session = voiceSession
         Task {
             let authorized = await voice.requestAuthorization()
+            // Stopped meanwhile: every stop, including a user pause (#15), bumps `voiceSession`.
             guard session == voiceSession, isVoiceListening else { return }
             guard authorized else {
                 isVoiceListening = false
