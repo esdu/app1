@@ -346,6 +346,11 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
 
     private var tolerance: Double { 0.5 / Double(max(1, configuration.frameRate)) }
 
+    /// How far (seconds) audio may run ahead of the newest video frame before it is dropped. Capture
+    /// delivers audio and video on one clock within a few hundred ms of each other, so only audio
+    /// without video (a stalled camera) reaches this.
+    static let maxAudioLead: Double = 1
+
     private func append(_ sampleBuffer: CMSampleBuffer, kind: MediaKind) {
         guard !suspended else { return }
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
@@ -378,6 +383,11 @@ final class RollingRecorder: NSObject, SampleSink, AVAssetWriterDelegate, @unche
         case .audio:
             guard let g = generation, let input = g.audioInput, g.writer.status == .writing,
                   pts >= g.startTime else { return }
+            // Never more than `maxAudioLead` past the newest video frame (issue #9). The writer
+            // interleaves audio with video, so audio with no video to go with it (the camera stopped
+            // while the microphone didn't) only piles up in it; in a UI test, appends then blocked
+            // this queue, and with it the main thread's next suspend. Clips end at a video frame anyway.
+            guard g.lastVideoPTS.isValid, (pts - g.lastVideoPTS).seconds <= Self.maxAudioLead else { return }
             guard waitUntilReady(input, writer: g.writer) else { return }
             if !input.append(sampleBuffer) { writerFailed(g, at: pts) }
         }
