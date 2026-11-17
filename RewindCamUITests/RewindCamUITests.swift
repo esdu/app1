@@ -232,6 +232,71 @@ final class RewindCamUITests: XCTestCase {
         screenshot(app, "low-disk-4-recording")
     }
 
+    /// Issue #15: Pause asks first (it discards the unsaved buffer); then the camera is off, a blue
+    /// banner says so and that saved clips are kept, the badge says PAUSED, and Save and Dim are disabled.
+    /// Leaving the app and coming back keeps it paused; Resume brings REC back and Save works again.
+    @MainActor
+    func testPauseHoldsAcrossBackgroundUntilResume() {
+        let app = launch()
+        let badge = element(app, "recordingBadge")
+        let recording = NSPredicate(format: "label BEGINSWITH %@", "REC")
+        wait(for: [expectation(for: recording, evaluatedWith: badge)], timeout: 15)
+        Thread.sleep(forTimeInterval: 4) // let the synthetic buffer fill a little
+        let pause = app.buttons["pauseButton"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 5), "no Pause button")
+        XCTAssertEqual(pause.label, "Pause recording")
+        XCTAssertTrue(pause.isHittable)
+        screenshot(app, "pause-1-recording")
+
+        pause.tap()
+        let confirm = app.buttons["Pause and discard buffer"]
+        XCTAssertTrue(confirm.waitForExistence(timeout: 5), "Pause doesn't ask before discarding the buffer")
+        screenshot(app, "pause-2-confirm")
+        confirm.tap()
+
+        let banner = element(app, "userPausedBanner")
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "no paused banner")
+        let why = banner.descendants(matching: .any)
+            .matching(NSPredicate(format: "label CONTAINS %@", "unsaved buffer was discarded")).firstMatch
+        XCTAssertTrue(why.exists, "the banner doesn't say what pausing discarded")
+        XCTAssertEqual(badge.label, "Paused by you")
+        let save = app.buttons["saveButton"]
+        XCTAssertFalse(save.isEnabled, "Save must be disabled while paused")
+        XCTAssertFalse(app.buttons["dimButton"].isEnabled, "Dim must be disabled while paused")
+        let resume = app.buttons["resumeButton"]
+        XCTAssertTrue(resume.exists, "no Resume button")
+        XCTAssertEqual(resume.label, "Resume recording")
+        screenshot(app, "pause-3-paused")
+
+        // Leave the app and come back: still paused, nothing restarts on its own.
+        XCUIDevice.shared.press(.home)
+        let deadline = Date().addingTimeInterval(15)
+        while app.state == .runningForeground, Date() < deadline { Thread.sleep(forTimeInterval: 0.2) }
+        XCTAssertNotEqual(app.state, .runningForeground, "RewindCam did not go to the background")
+        Thread.sleep(forTimeInterval: 2)
+        app.activate()
+        XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15), "RewindCam did not come back")
+        XCTAssertTrue(banner.waitForExistence(timeout: 10), "the pause didn't survive the trip to the background")
+        Thread.sleep(forTimeInterval: 3)
+        XCTAssertTrue(banner.exists, "paused banner went away on its own")
+        XCTAssertEqual(badge.label, "Paused by you")
+        XCTAssertFalse(save.isEnabled)
+        screenshot(app, "pause-4-after-foreground")
+
+        resume.tap()
+        wait(for: [expectation(for: recording, evaluatedWith: badge)], timeout: 15)
+        XCTAssertTrue(banner.waitForNonExistence(timeout: 10), "paused banner still shown after Resume")
+        wait(for: [expectation(for: NSPredicate(format: "isEnabled == true"), evaluatedWith: save)], timeout: 15)
+        XCTAssertTrue(app.buttons["pauseButton"].exists, "Pause is back")
+        XCTAssertTrue(app.buttons["dimButton"].isEnabled)
+        Thread.sleep(forTimeInterval: 3) // let the new buffer fill a little
+        screenshot(app, "pause-5-resumed")
+        save.tap()
+        let toast = element(app, "toast")
+        XCTAssertTrue(toast.waitForExistence(timeout: 20), "no confirmation toast")
+        XCTAssertTrue(toast.label.contains("Saved"), "toast says: \(toast.label)")
+    }
+
     @MainActor
     func testChangeBufferTo60Seconds() {
         let app = launch()

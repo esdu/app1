@@ -94,14 +94,30 @@ private struct RecordingBadge: View {
     var body: some View {
         let recording = model.phase == .recording
         HStack(spacing: 6) {
-            Circle()
-                .fill(recording ? Color.red : Color.gray)
-                .frame(width: 10, height: 10)
+            if model.phase == .userPaused {
+                Image(systemName: "pause.fill")
+                    .font(.caption2)
+                    .frame(width: 10, height: 10)
+            } else {
+                Circle()
+                    .fill(recording ? Color.red : Color.gray)
+                    .frame(width: 10, height: 10)
+            }
             Text(recording ? "REC \(model.readySeconds) s" : phaseLabel)
         }
         .pill()
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
         .accessibilityIdentifier("recordingBadge")
+    }
+
+    private var accessibilityText: String {
+        switch model.phase {
+        case .recording: "REC \(model.readySeconds) s"
+        // Not to be confused with an interruption's PAUSED (issue #15).
+        case .userPaused: "Paused by you"
+        default: phaseLabel
+        }
     }
 
     private var phaseLabel: String {
@@ -113,6 +129,7 @@ private struct RecordingBadge: View {
         case .cameraDenied: "OFF"
         case .failed: "ERROR"
         case .outOfSpace: "NO SPACE"
+        case .userPaused: "PAUSED"
         }
     }
 }
@@ -154,6 +171,10 @@ private struct Banners: View {
                 Banner(icon: "thermometer.high", text: message, tint: .orange)
                     .accessibilityIdentifier("thermalBanner")
             }
+            // The user paused (issue #15): what that means, and that it lasts until Resume.
+            if let notice = model.userPausedNotice {
+                NoticeBanner(notice: notice)
+            }
             if case .paused(let why) = model.phase {
                 Banner(icon: "pause.circle.fill", text: why + " The buffer was cleared.", tint: .yellow)
                     .accessibilityIdentifier("pausedBanner")
@@ -194,7 +215,11 @@ struct NoticeBanner: View {
     let notice: AppNotice
 
     var body: some View {
-        let tint: Color = notice.severity == .error ? .red : .orange
+        let tint: Color = switch notice.severity {
+        case .error: .red
+        case .warning: .orange
+        case .info: .blue
+        }
         HStack(spacing: 10) {
             Image(systemName: notice.systemImage)
                 .accessibilityHidden(true)
@@ -327,12 +352,22 @@ private struct Controls: View {
     @Binding var showSettings: Bool
 
     var body: some View {
+        VStack(spacing: 14) {
+            PauseResumeButton()
+            mainRow
+        }
+    }
+
+    private var mainRow: some View {
         // Nothing is buffered unless recording, so Save is disabled and says why (issue #8).
         let unavailable = model.saveUnavailableReason
-        HStack(alignment: .center) {
+        return HStack(alignment: .center) {
             RoundIconButton(systemImage: "moon.fill", label: "Dim screen") {
                 model.setDimmed(true)
             }
+            // Nothing to keep the screen on for while the user has paused (issue #15).
+            .disabled(model.isUserPaused)
+            .opacity(model.isUserPaused ? 0.4 : 1)
             .accessibilityIdentifier("dimButton")
 
             Spacer()
@@ -374,12 +409,56 @@ private struct Controls: View {
     }
 
     private var unavailableSubtitle: String {
-        model.phase == .starting || model.phase == .idle ? "starting…" : "not recording"
+        switch model.phase {
+        case .starting, .idle: "starting…"
+        case .userPaused: "paused"
+        default: "not recording"
+        }
     }
 
     private var saveSubtitle: String {
         let post = model.settings.postRollSeconds
         return post > 0 ? "last \(model.settings.bufferSeconds) s\n+ \(post) s after" : "last \(model.settings.bufferSeconds) s"
+    }
+}
+
+/// Pause / Resume (issue #15). Pause asks first when it would discard footage (`pauseDiscardWarning`);
+/// Resume is the only way out of the pause, so it is prominent while paused.
+private struct PauseResumeButton: View {
+    @Environment(AppModel.self) private var model
+    @State private var confirmPause = false
+
+    var body: some View {
+        let paused = model.isUserPaused
+        Button {
+            if paused {
+                model.resumeCapture()
+            } else if model.pauseDiscardWarning != nil {
+                confirmPause = true
+            } else {
+                model.pauseCapture()
+            }
+        } label: {
+            Label(paused ? "Resume" : "Pause", systemImage: paused ? "play.fill" : "pause.fill")
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 18)
+                .frame(minHeight: 44)
+                .background(Capsule().fill(paused ? Color.blue : Color.black.opacity(0.55)))
+                .overlay(Capsule().stroke(.white.opacity(paused ? 0.9 : 0.4), lineWidth: 1))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(paused ? "Resume recording" : "Pause recording")
+        .accessibilityHint(paused
+            ? "Turns the camera back on and starts filling the buffer again."
+            : "Turns the camera off and discards the unsaved buffer. Saved clips are kept.")
+        .accessibilityIdentifier(paused ? "resumeButton" : "pauseButton")
+        .confirmationDialog("Pause recording?", isPresented: $confirmPause, titleVisibility: .visible) {
+            Button("Pause and discard buffer", role: .destructive) { model.pauseCapture() }
+            Button("Keep recording", role: .cancel) {}
+        } message: {
+            Text(model.pauseDiscardWarning ?? "")
+        }
     }
 }
 

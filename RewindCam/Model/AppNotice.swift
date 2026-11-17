@@ -3,6 +3,7 @@
 ///
 /// Issue #3 adds the microphone notice (`AppModel.microphoneNotice`); issue #8 adds the start-failure
 /// notice (`AppModel.startFailureNotice`: camera denied → `.openSettings`, other failures → `.tryAgain`).
+/// Issue #15 adds the user-pause notice (`AppModel.userPausedNotice`, `.info`, no action).
 /// There is one "go to Settings" path and one banner for all of them.
 struct AppNotice: Equatable, Sendable {
     enum Action: Equatable, Sendable {
@@ -15,6 +16,8 @@ struct AppNotice: Equatable, Sendable {
     }
 
     enum Severity: Equatable, Sendable {
+        /// Nothing is wrong: a state the user chose, e.g. their own pause (issue #15) (blue).
+        case info
         /// Recording works, but not as the user asked (orange).
         case warning
         /// Recording doesn't work (red).

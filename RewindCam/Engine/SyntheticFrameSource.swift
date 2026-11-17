@@ -63,6 +63,17 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     /// The next successful `start(_:)` lets video through again (`stallVideoOnce`).
     private var videoReleasedOnStart = false
     private var stallAfterFirstStart: TimeInterval?
+    /// `holdNextStart()`: a start waiting like one behind a permission prompt (issue #15).
+    private let startGate = Locked(StartGate())
+
+    private struct StartGate {
+        var holdNext = false
+        /// A held start is waiting (or about to wait) for `releaseHeldStart()`.
+        var held = false
+        var released = false
+        var waiter: CheckedContinuation<Void, Never>?
+        var arrivals: [CheckedContinuation<Void, Never>] = []
+    }
 
     static let audioSampleRate: Int32 = 48_000
     static let audioChunk = 1_024
@@ -89,7 +100,8 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     /// Like `CameraFrameSource`, audio is delivered only when the configuration asks for it and the
     /// (simulated) microphone is usable; the result says which.
     func start(_ configuration: CaptureConfiguration) async throws -> ActiveCapture {
-        try queue.sync { () throws -> ActiveCapture in
+        await passStartGate()
+        return try queue.sync { () throws -> ActiveCapture in
             starts += 1
             if let startError {
                 // Like a camera that can't start: nothing runs afterwards.
@@ -172,6 +184,67 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
 
     /// How many times `start(_:)` was called, including failed starts (tests).
     var startCount: Int { queue.sync { starts } }
+
+    /// Makes the next `start(_:)` wait, before it does anything, until `releaseHeldStart()`: a camera
+    /// permission prompt the user hasn't answered, or a slow session start (issue #15). What it does
+    /// once released follows `setStartError` at that moment (a denial answered late, for example).
+    func holdNextStart() {
+        startGate.withLock { $0.holdNext = true }
+    }
+
+    /// Returns once a start held by `holdNextStart()` is waiting.
+    func waitForHeldStart() async {
+        await withCheckedContinuation { (arrived: CheckedContinuation<Void, Never>) in
+            let now = startGate.withLock { gate -> Bool in
+                if gate.held { return true }
+                gate.arrivals.append(arrived)
+                return false
+            }
+            if now { arrived.resume() }
+        }
+    }
+
+    /// Lets the held start go on (no effect if none is held).
+    func releaseHeldStart() {
+        let waiter = startGate.withLock { gate -> CheckedContinuation<Void, Never>? in
+            guard gate.held else { return nil }
+            gate.held = false
+            if let waiter = gate.waiter {
+                gate.waiter = nil
+                return waiter
+            }
+            gate.released = true // it hasn't reached `withCheckedContinuation` yet
+            return nil
+        }
+        waiter?.resume()
+    }
+
+    /// True while a held start waits for `releaseHeldStart()`.
+    var isHoldingStart: Bool { startGate.current.held }
+
+    private func passStartGate() async {
+        let arrivals = startGate.withLock { gate -> [CheckedContinuation<Void, Never>]? in
+            guard gate.holdNext else { return nil }
+            gate.holdNext = false
+            gate.held = true
+            gate.released = false
+            defer { gate.arrivals = [] }
+            return gate.arrivals
+        }
+        guard let arrivals else { return }
+        for arrived in arrivals { arrived.resume() }
+        await withCheckedContinuation { (go: CheckedContinuation<Void, Never>) in
+            let now = startGate.withLock { gate -> Bool in
+                if gate.released {
+                    gate.released = false
+                    return true
+                }
+                gate.waiter = go
+                return false
+            }
+            if now { go.resume() }
+        }
+    }
 
     func stop() async {
         queue.sync {
