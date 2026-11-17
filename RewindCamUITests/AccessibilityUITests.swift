@@ -93,6 +93,11 @@ final class AccessibilityUITests: XCTestCase {
                       "no unsaved-clips banner after the failed Photos save")
         screenshot(app, "a11y-1b-three-banners")
         assertMainScreenFits(app, "three banners")
+        // Audit once the toast has gone (it fades), so nothing is moving.
+        XCTAssertTrue(element(app, "toast").waitForNonExistence(timeout: 10), "toast didn't go away")
+        Thread.sleep(forTimeInterval: 1)
+        screenshot(app, "a11y-1c-three-banners-no-toast")
+        assertMainScreenFits(app, "three banners, no toast")
         try AuditLog.run(on: app, "main screen, largest text, three banners", types: .textClipped, test: self)
 
         app.buttons["settingsButton"].tap()
@@ -158,6 +163,8 @@ final class AccessibilityUITests: XCTestCase {
         try AuditLog.run(on: app, "Settings", types: .all, systemForm: true, test: self)
         app.swipeUp()
         app.swipeUp()
+        Thread.sleep(forTimeInterval: 2) // let the scroll come to rest: the audit measures what is drawn
+        screenshot(app, "a11y-audit-settings-scrolled")
         try AuditLog.run(on: app, "Settings, scrolled down", types: .all, systemForm: true, test: self)
         app.buttons["doneButton"].tap()
         app.buttons["resumeButton"].tap()
@@ -281,6 +288,12 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
         // at accessibility sizes the segmented pickers are replaced by menus (a11y-2* screenshots).
         if systemForm, frame == nil, type == .dynamicType || type == .textClipped || type == .contrast {
             return "no element: UIKit internals of a system control in the Settings Form"
+        }
+        // "Text that should be accessible" with no element: the only drawn text the app doesn't expose is
+        // the timestamp burned into the synthetic test footage (`SyntheticFrameSource`), which is
+        // decorative and hidden from VoiceOver like the real camera preview (it shows above the sheet).
+        if type == .elementDetection, frame == nil {
+            return "text drawn into the synthetic test footage (preview hidden from VoiceOver)"
         }
         // A row running past the bottom of the screen in a scrolling list is cut by the screen edge, not
         // truncated; the test scrolls and audits again.
