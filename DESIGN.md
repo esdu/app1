@@ -792,6 +792,28 @@ at the 60 fps bitrate (README "Known limits"; the device checklist checks it).
 * `UIApplication.isIdleTimerDisabled = true` while the camera runs.
 * **Dim**: a black overlay at 92 % opacity, with screen brightness set to 0.02 (the previous value is restored when you tap to
   wake). The camera keeps recording under the overlay, and the volume buttons still save.
+  **Brightness and the scene (issue #38).** `isDimmed` is the overlay; the system brightness
+  (`UIScreen.brightness`, which is device-wide) follows it only while the scene is `.active`.
+  `scenePhaseChanged(.inactive)` (call screen, Control Center, Notification Centre, alerts, the app
+  switcher) puts the level back and keeps the overlay; `.active` reads the current level again and
+  dims; `.background` wakes (as before). No announcement comes from these changes: the overlay, and so
+  what VoiceOver reaches, doesn't change. The level from before is kept in memory and in the
+  settings store (`SettingsStore.saveDimRestore`, a `DimRestore`: `UserDefaults` keys
+  `dimRestoreBrightness.v1` and `dimRestoreDimmedReadBack.v1` beside `recordingSettings.v1`; the level
+  is written *before* the brightness drops, both are removed once it is back), so a run killed while
+  dimmed can be undone: at the first `.inactive` or `.active` of the next launch (not in `init`, where
+  no window scene exists to read or set the brightness) a stored value is restored once and removed.
+  After setting 0.02 the model reads the brightness back and keeps that too (in memory and in the
+  second key), because a screen may clamp the minimum or round it. Every restore (wake, `.inactive`,
+  relaunch) puts the old level back only if the screen is still within 0.005 of that read-back (of
+  0.02 if no read-back was stored, e.g. a kill between the two writes, or it can't be read); a level
+  the user or auto-brightness set meanwhile, or one iOS restored after a lock, is left alone. Tests
+  cover screens that read back 0.1 (clamped) and 0.0196 (rounded) with `FakeScreenController.readBack`.
+  Pause (#15) wakes
+  from Dim like before, and Dim is refused while paused, so no scene change re-dims a paused app.
+  Limit: notification banners draw over an app that stays `.active`, and there is no API to learn a
+  banner is showing, so they appear at 2 %. The `UserDefaults` use is app-only state, so the privacy
+  manifest's CA92.1 still covers it.
 * Battery level and state come from `UIDevice` and are shown in the status bar and in Settings. In the
   Simulator the level is unknown: the status bar shows the icon alone (VoiceOver: "Battery level
   unknown") and Settings says "Unknown".

@@ -139,7 +139,18 @@ final class AppModel {
     /// Source events handled so far (tests compare it with how many were emitted).
     @ObservationIgnored private(set) var handledSourceEvents = 0
     @ObservationIgnored private var toastTask: Task<Void, Never>?
+    /// Dim (issue #38): the brightness to put back while RewindCam holds the system brightness at
+    /// `dimmedBrightness`; nil while it doesn't (awake, or dimmed with the scene not active). Mirrored in
+    /// `settingsStore` (`saveDimRestore`) so the next launch can put it back after a kill.
     @ObservationIgnored private var savedBrightness: CGFloat?
+    /// What the screen read back after Dim set `dimmedBrightness` (a device may clamp or round it); the
+    /// level that counts as "still dimmed" when putting `savedBrightness` back. Persisted with it.
+    @ObservationIgnored private var dimmedReadBack: CGFloat?
+    /// The scene is `.active` (last `scenePhaseChanged`). The system brightness follows Dim only then;
+    /// the overlay stays up regardless. True until told otherwise: Dim is tapped in an active scene.
+    @ObservationIgnored private var sceneIsActive = true
+    /// The brightness a previous run left to restore has been looked at (`restoreBrightnessFromLastRun`).
+    @ObservationIgnored private var checkedLastRunBrightness = false
     @ObservationIgnored private var wantsRunning = false
     /// Capture generation (issue #15): bumped by every change of intent -- `start()`, `stop()`,
     /// `pauseCapture()`, `resumeCapture()`. Work queued for one generation (a start, a reconfigure, a
@@ -546,16 +557,26 @@ final class AppModel {
     func scenePhaseChanged(_ phase: ScenePhase) {
         switch phase {
         case .active:
+            restoreBrightnessFromLastRun()
+            sceneIsActive = true
+            // Back from Control Center, a call or an alert with the overlay still up: dim again (#38).
+            if isDimmed { lowerBrightness() }
             // Not running (launch, back from the background), or the last start failed: start again.
             // The failed case is how "allowed the camera in Settings and came back" recovers when iOS
             // doesn't background the app in between (e.g. a permission prompt was just answered).
             // An explicit pause (#15) holds: `start()` does nothing until Resume.
             if !wantsRunning || self.phase.isStartFailure { start() }
         case .background:
+            sceneIsActive = false
             setDimmed(false)
             stop(reason: .backgrounded)
         default:
-            break // .inactive (Control Center, alerts): capture keeps running.
+            // .inactive (Control Center, Notification Centre, alerts, an incoming call, the app switcher):
+            // capture keeps running and the overlay stays, but the brightness goes back so what iOS shows
+            // is readable (#38); `.active` dims again. Nothing is announced: nothing changed for the user.
+            restoreBrightnessFromLastRun()
+            sceneIsActive = false
+            restoreBrightness()
         }
     }
 
@@ -876,18 +897,71 @@ final class AppModel {
 
     // MARK: Dim mode
 
+    /// The system screen brightness while dimmed (and the scene is active).
+    static let dimmedBrightness: CGFloat = 0.02
+
     /// Dim is for long recording sessions; while the user has paused (#15) nothing records and the screen
     /// may lock, so dimming is refused (the button is disabled) and pausing wakes the screen.
+    ///
+    /// `isDimmed` is the overlay. The system brightness follows it only while the scene is active
+    /// (issue #38; `scenePhaseChanged`): `.inactive` puts it back so iOS's own screens are readable,
+    /// `.active` lowers it again. Waking puts back the level from before only if the screen is still at
+    /// `dimmedBrightness`; a level the user or auto-brightness set meanwhile is left alone.
     func setDimmed(_ dimmed: Bool) {
         guard dimmed != isDimmed, !(dimmed && isUserPaused) else { return }
         isDimmed = dimmed
         if dimmed {
-            savedBrightness = environment.screen.brightness
-            environment.screen.brightness = 0.02
+            if sceneIsActive { lowerBrightness() }
         } else {
-            environment.screen.brightness = savedBrightness ?? 0.6
-            savedBrightness = nil
+            restoreBrightness()
         }
+    }
+
+    /// Remembers the current brightness (in memory and in the store, written first so a kill from here on
+    /// can be undone at the next launch), lowers it, and remembers what the screen then reports.
+    /// Does nothing if already lowered.
+    private func lowerBrightness() {
+        restoreBrightnessFromLastRun() // never overwrite what a killed run left to restore
+        guard savedBrightness == nil else { return }
+        let current = environment.screen.brightness
+        savedBrightness = current
+        environment.settingsStore.saveDimRestore(DimRestore(brightness: Double(current), dimmedReadBack: nil))
+        environment.screen.brightness = Self.dimmedBrightness
+        let readBack = environment.screen.brightness
+        dimmedReadBack = readBack
+        environment.settingsStore.saveDimRestore(DimRestore(brightness: Double(current),
+                                                            dimmedReadBack: Double(readBack)))
+    }
+
+    /// Puts back the remembered brightness (unless changed meanwhile) and forgets it. Does nothing if
+    /// the brightness isn't lowered.
+    private func restoreBrightness() {
+        guard let saved = savedBrightness else { return }
+        let readBack = dimmedReadBack
+        savedBrightness = nil
+        dimmedReadBack = nil
+        Self.putBack(saved, ifStillAt: readBack, on: environment.screen)
+        environment.settingsStore.saveDimRestore(nil)
+    }
+
+    /// Once per process, at the first foreground scene phase: a run that ended while dimmed (kill, crash)
+    /// left its brightness in the store; put it back if the screen is still at the dimmed level, and
+    /// clear it either way. Not in `init`: before a window scene exists the brightness can't be read or set.
+    private func restoreBrightnessFromLastRun() {
+        guard !checkedLastRunBrightness else { return }
+        checkedLastRunBrightness = true
+        guard let pending = environment.settingsStore.loadDimRestore() else { return }
+        Self.putBack(CGFloat(pending.brightness), ifStillAt: pending.dimmedReadBack.map { CGFloat($0) },
+                     on: environment.screen)
+        environment.settingsStore.saveDimRestore(nil)
+    }
+
+    /// `saved` unless the screen is no longer at the dimmed level, i.e. what it read back once dimmed
+    /// (`dimmedBrightness` if that isn't known): a level the user, auto-brightness or a lock since a kill
+    /// set wins.
+    private static func putBack(_ saved: CGFloat, ifStillAt dimmedLevel: CGFloat?, on screen: ScreenController) {
+        guard abs(screen.brightness - (dimmedLevel ?? dimmedBrightness)) < 0.005 else { return }
+        screen.brightness = saved
     }
 
     // MARK: Toast
