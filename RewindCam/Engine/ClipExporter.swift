@@ -23,8 +23,9 @@ enum ClipExporter {
     }
 
     /// Exports into the bundle's own job folder (tests; the folder is deleted by `discard()`).
-    static func export(_ bundle: SegmentBundle, fileName: String = defaultFileName()) async throws -> ExportedClip {
-        try await export(bundle, to: bundle.directory.appendingPathComponent(fileName))
+    static func export(_ bundle: SegmentBundle, fileName: String = defaultFileName(),
+                       orientation: ClipOrientation = .upright) async throws -> ExportedClip {
+        try await export(bundle, to: bundle.directory.appendingPathComponent(fileName), orientation: orientation)
     }
 
     /// Exports to `output`, which may be outside the bundle's folder: the app writes
@@ -33,7 +34,12 @@ enum ClipExporter {
     ///
     /// `outputByteLimit` (issue #14) is passed to the export session as `fileLengthLimit`: the output
     /// stops near it (the session may write slightly past it; the free-space reserve covers that).
-    static func export(_ bundle: SegmentBundle, to output: URL, outputByteLimit: Int64? = nil) async throws -> ExportedClip {
+    ///
+    /// `orientation` (issue #37) turns the clip for the way the phone was held at the save tap: it becomes
+    /// the video track's `preferredTransform` (no re-encode). The frames themselves are always the portrait
+    /// buffer (`CaptureGeometry`).
+    static func export(_ bundle: SegmentBundle, to output: URL, outputByteLimit: Int64? = nil,
+                       orientation: ClipOrientation = .upright) async throws -> ExportedClip {
         guard let last = bundle.segments.last, bundle.clipDuration > 0 else { throw ExportError.empty }
         let fm = FileManager.default
 
@@ -63,7 +69,7 @@ enum ClipExporter {
                                                           preferredTrackID: kCMPersistentTrackID_Invalid)
         else { throw ExportError.exportFailed("no composition track") }
         try compVideo.insertTimeRange(range, of: video, at: .zero)
-        compVideo.preferredTransform = try await video.load(.preferredTransform)
+        compVideo.preferredTransform = try await displayTransform(of: video, turnedFor: orientation)
 
         if let audio = try await asset.loadTracks(withMediaType: .audio).first {
             let audioRange = try await audio.load(.timeRange)
@@ -83,6 +89,17 @@ enum ClipExporter {
     }
 
     static func defaultFileName() -> String { defaultBaseName() + ".mov" }
+
+    /// The source track's own transform (the writer's: identity), followed by the turn for `orientation`.
+    static func displayTransform(of track: AVAssetTrack, turnedFor orientation: ClipOrientation) async throws
+        -> CGAffineTransform {
+        let source = try await track.load(.preferredTransform)
+        let natural = try await track.load(.naturalSize)
+        let shown = CGRect(origin: .zero, size: natural).applying(source)
+        return source
+            .concatenating(CGAffineTransform(translationX: -shown.minX, y: -shown.minY))
+            .concatenating(orientation.transform(naturalSize: shown.size))
+    }
 
     /// `RewindCam_<date>_<time>`, without an extension.
     static func defaultBaseName(at date: Date = Date()) -> String {
