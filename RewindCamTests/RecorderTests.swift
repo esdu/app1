@@ -187,6 +187,7 @@ struct RecorderTests {
         h.recorder.reconfigure(config)
         let controlStart = h.now
         try await h.generatePaced(seconds: 6)
+        #expect(abs(h.now - controlStart - 6) < 1e-6, "6 s of frames, one per step")
         let lastFrame = h.now - 1 / Double(h.frameRate)
         #expect(abs((h.recorder.status().latestMediaTime ?? -1) - lastFrame) < 1e-6,
                 "every paced frame is appended, none dropped; \(h.diagnostics)")

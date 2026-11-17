@@ -85,10 +85,12 @@ final class RecorderHarness {
     /// dropped and the segments are the ones the offline writer produces.
     func generatePaced(seconds: Double) async throws {
         // As many frames as `source.generate(seconds:)` emits (counted, not compared with `now`, which only
-        // means something once the source's timeline has started).
+        // means something once the source's timeline has started). Each step asks for half a frame
+        // interval: exactly one video frame. (A whole interval sometimes yields two: the timeline is on the
+        // host clock's nanosecond timescale, where 1/15 s rounds to 66 666 666 or 66 666 667 ns.)
         for _ in 0..<Int((seconds * Double(frameRate)).rounded()) {
             try await waitUntilVideoInputReady()
-            source.generate(seconds: 1 / Double(frameRate)) // exactly one video frame (and the audio up to it)
+            source.generate(seconds: 0.5 / Double(frameRate))
         }
     }
 
