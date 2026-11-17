@@ -130,6 +130,7 @@ struct SettingsView: View {
                         .font(.footnote)
                 }
             }
+            .accessibilityIdentifier("settingsForm")
             .onAppear { model.refreshDiskSpace() }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)

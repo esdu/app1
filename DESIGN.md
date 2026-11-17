@@ -748,9 +748,15 @@ Each change restarts the writer (new generation), and the UI shows a banner such
 * **Checks.** `AccessibilityUITests` launches at the largest text size with three banners and checks the
   controls stay on screen, hittable and apart (screenshots `a11y-*`), and runs Xcode's
   `performAccessibilityAudit()` on the main screen (recording, dimmed, paused) and Settings. Contrast
-  is audited on the paused screen (black preview), not over the synthetic colour bars; the only other
-  exclusions are the deliberately capped elements' Dynamic Type results (`AuditLog.excuse`). Real
-  VoiceOver speech and runtime text-size changes are on the README's device checklist.
+  is audited on the paused screen (black preview), not over the synthetic colour bars. The other
+  exclusions, each with its reason in `AuditLog.excuse`: Dynamic Type results for the deliberately
+  capped elements; "partially unsupported" Dynamic Type for text the largest-text test shows wrapping
+  at full size (banners, dim overlay, Settings rows, Done); issues in the Settings Form that XCUITest
+  can't attach to any element (UIKit internals of system controls; the segmented pickers become menus
+  at accessibility sizes); and text cut by the screen edge in a scrolling list. Excused issues are
+  attached to the test result as `audit-excused-*`. While dimmed, everything under the overlay is
+  hidden from VoiceOver and the overlay is modal. Real VoiceOver speech and runtime text-size changes
+  are on the README's device checklist.
 
 ## 5. Testing strategy
 

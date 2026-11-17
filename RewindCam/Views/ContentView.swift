@@ -72,6 +72,9 @@ struct ContentView: View {
             }
             .padding(.horizontal, 16)
             .padding(.bottom, 8)
+            // While dimmed, VoiceOver reaches only the overlay (wake, or its Save action), not the
+            // controls hidden under it.
+            .accessibilityHidden(model.isDimmed)
 
             if model.isDimmed {
                 DimOverlay()
@@ -90,7 +93,7 @@ enum ContrastPalette {
     static let orange = Color(red: 0.66, green: 0.31, blue: 0.0)
     static let blue = Color(red: 0.0, green: 0.35, blue: 0.80)
     /// Disabled Save: dark enough for its white "not recording" subtitle over bright footage.
-    static let disabledFill = Color(white: 0.22).opacity(0.9)
+    static let disabledFill = Color(white: 0.12).opacity(0.92)
 }
 
 private struct StatusBar: View {
@@ -226,14 +229,17 @@ private struct BatteryLabel: View {
         let percent = level.map { Int(($0 * 100).rounded()) }
         HStack(spacing: 3) {
             Image(systemName: symbol(level))
-            Text(percent.map { "\($0)%" } ?? "—")
+            // Unknown (Simulator): the icon alone; VoiceOver says "Battery level unknown".
+            if let percent {
+                Text("\(percent)%")
+            }
         }
         .pill()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(percent.map { "Battery \($0) percent" + (model.isCharging ? ", charging" : "") }
             ?? "Battery level unknown")
         .accessibilityShowsLargeContentViewer {
-            Label(percent.map { "\($0)%" } ?? "—", systemImage: symbol(level))
+            Label(percent.map { "\($0)%" } ?? "Battery level unknown", systemImage: symbol(level))
         }
         .accessibilityIdentifier("batteryLabel")
     }
@@ -536,7 +542,7 @@ private struct Controls: View {
                 // Capped so it fits the circle; VoiceOver and the large content viewer read "Save".
                 .dynamicTypeSize(...DynamicTypeSize.accessibility1)
                 .padding(18)
-                .foregroundStyle(.white.opacity(unavailable == nil ? 1 : 0.85))
+                .foregroundStyle(.white)
                 .frame(width: saveDiameter, height: saveDiameter)
                 .background(Circle().fill(unavailable == nil ? ContrastPalette.red : ContrastPalette.disabledFill))
                 .overlay(Circle().stroke(.white.opacity(unavailable == nil ? 1 : 0.45), lineWidth: 4))
@@ -664,9 +670,10 @@ private struct DimOverlay: View {
         ZStack {
             Color.black.opacity(0.92).ignoresSafeArea()
             VStack(spacing: 12) {
-                HStack(spacing: 6) {
-                    Circle().fill(recording ? Color.red : Color.gray).frame(width: 8, height: 8)
+                Label {
                     Text(recording ? "Recording · \(model.readySeconds) s ready" : "Not recording")
+                } icon: {
+                    Circle().fill(recording ? Color.red : Color.gray).frame(width: 8, height: 8)
                 }
                 Text("Tap anywhere to wake")
                     .font(.footnote)
@@ -685,7 +692,7 @@ private struct DimOverlay: View {
         .accessibilityValue(recording ? "Recording, " + RecordingBadge.secondsReady(model.readySeconds)
             : "Not recording")
         .accessibilityHint("Double-tap to wake the screen. The Save action, and the volume buttons, save without waking it.")
-        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits([.isButton, .isModal])
         .accessibilityAction { model.setDimmed(false) }
         .accessibilityAction(named: "Save") { model.save() }
         .accessibilityIdentifier("dimOverlay")
