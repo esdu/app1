@@ -25,7 +25,8 @@ struct AppEnvironment {
     /// "Open Settings" buttons (microphone notice, camera denied). Opens the real Settings app in
     /// `-UITestMode` too, so a UI test can see it come forward.
     var appSettings: AppSettingsOpener
-    /// The model's timers: the status loop and capture-recovery backoff (issue #4). Tests: `FakeDelayScheduler`.
+    /// The model's timers: the status loop and capture-recovery backoff (issue #4); live, also the voice
+    /// trigger's restart backoff (#36). Tests: `FakeDelayScheduler`.
     var scheduler: DelayScheduler
     /// Free space on the media volume (issue #10), judged by `DiskSpacePolicy`. Tests: `FakeDiskCapacity`.
     var diskCapacity: DiskCapacityProvider
@@ -67,6 +68,7 @@ struct AppEnvironment {
 
     static func live() -> AppEnvironment {
         let storage = FileBufferStorage.standard
+        let scheduler = SystemDelayScheduler()
         return AppEnvironment(
             isUITest: false,
             source: CameraFrameSource(),
@@ -83,9 +85,10 @@ struct AppEnvironment {
             supportsCaptureButtons: true,
             backgroundTasks: SystemBackgroundTasks(),
             appSettings: SystemAppSettingsOpener(),
-            scheduler: SystemDelayScheduler(),
+            scheduler: scheduler,
             diskCapacity: storage.capacity,
-            voice: SpeechVoiceTrigger()
+            // Its restart backoff (issue #36) uses the same timers.
+            voice: SpeechVoiceTrigger(scheduler: scheduler)
         )
     }
 
