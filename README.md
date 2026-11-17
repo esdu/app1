@@ -42,6 +42,13 @@ source, because the Simulator has no camera.*
   phone gets hot. Battery level is shown.
 - **Interruptions** (calls, another app taking the camera, backgrounding) pause cleanly and clear
   the buffer, and capture resumes on its own when the app comes back.
+- **Pause / Resume**: RewindCam still starts recording on launch and resumes on its own, but you can
+  tap **Pause** (above Save) to turn the camera off. If footage is buffered it asks first, because
+  pausing discards the unsaved buffer; clips you saved, and clips waiting for Photos, are kept. While
+  paused the badge says PAUSED, a blue banner explains it, Save, the volume buttons and the voice
+  trigger refuse (and say why), Dim is off and the screen may lock. The pause holds when you leave the
+  app and come back, after a trip to Settings, and through camera errors or interruptions ending,
+  until you tap **Resume**.
 - **Camera errors recover or say so**: after a capture-session error the app restarts the camera
   (at once, then backing off for about 30 s). If that doesn't work it stops, wakes the screen from Dim
   and shows "Not recording" with **Try Again**, instead of claiming to restart forever. A status
@@ -110,6 +117,10 @@ Full details, threading and buffer math are in **[DESIGN.md](DESIGN.md)**.
   Settings › General › iPhone Storage shows. Tested with a fake free-space value only; real full-phone
   behaviour is not verified on a device yet.
 - The voice trigger is English (en-US) and needs a device that supports on-device recognition.
+- **A pause lasts until Resume or until RewindCam is relaunched**: it isn't saved, so a relaunch (also
+  after iOS ends the app in the background) records again, as before. While paused the camera session
+  is off, so the volume buttons may change the volume instead of reaching RewindCam (not verified on a
+  device). Pause and its races are tested with the synthetic source only.
 - The camera-denied and start-failure paths are tested with the synthetic source (unit and UI tests);
   the real camera prompt and `CameraFrameSource`'s configuration failures are not verified on a device yet.
 - With the microphone denied, clips have no sound track at all. The microphone paths of
@@ -206,6 +217,16 @@ xcodebuild -project RewindCam.xcodeproj -scheme RewindCam -destination 'generic/
       or the toast explains why not, never silently. Then, while recording, fill the phone further:
       within about 5 s of free space falling under 64 MB recording stops with the red banner. Free space
       and tap **Try Again** (or leave and return): recording starts. Clips waiting for Photos are never deleted.
+- [ ] **Pause / Resume**: record 10 s, tap **Pause**: it asks before discarding the buffer; confirm.
+      The camera indicator goes off, the badge says PAUSED, the blue banner explains, Save is greyed
+      out, Dim is disabled, and the screen locks after the usual auto-lock time. Press a volume button:
+      no clip is saved (the volume changes, or a "Can't save" toast appears). Switch to another app and
+      back, and open Settings and come back: still paused. With Camera.app opened from Control Center
+      while paused, closing it doesn't start RewindCam. On a fresh install, go to the Home Screen while
+      the camera permission prompt is up, come back and answer it: recording starts once, with no
+      "Camera access is off" flash. Right after a launch, tap Pause while the badge still says STARTING:
+      it stays paused with no camera indicator. Tap **Resume**: REC returns and Save works. Force-quit
+      while paused and relaunch: it records (the pause isn't kept).
 - [ ] **Lock during save**: with +10 s post-roll, tap Save and lock the phone at once. After 30 s,
       unlock: the clip is in Photos (or, if not, offered for Retry), never silently gone.
 - [ ] **Locked export (file protection)**: at 4K60 with a 120 s buffer and +30 s post-roll, record
