@@ -22,13 +22,14 @@ final class MotionOrientationSensor: DeviceOrientationSensor {
     static let updateInterval: TimeInterval = 0.1
 
     private let manager = CMMotionManager()
-    private let clock: MonotonicClock
+    // Sendable (both clocks are), so the nonisolated init may store it.
+    private let clock: any MonotonicClock & Sendable
     private let usesAccelerometer: Bool
     private var tracker = OrientationTracker()
 
     /// `usesAccelerometer: false` (tests) never turns the accelerometer on; feed `receive(_:)` instead.
     /// Nonisolated so it can be `AppEnvironment`'s default; nothing runs until `start()`.
-    nonisolated init(clock: MonotonicClock = HostMonotonicClock(), usesAccelerometer: Bool = true) {
+    nonisolated init(clock: any MonotonicClock & Sendable = HostMonotonicClock(), usesAccelerometer: Bool = true) {
         self.clock = clock
         self.usesAccelerometer = usesAccelerometer
     }

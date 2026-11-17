@@ -166,7 +166,7 @@ struct OrientationExportTests {
     /// What a 180×320 (portrait, like the camera's buffers) clip must carry.
     private static func expected(_ device: DeviceOrientation) -> (transform: CGAffineTransform, display: CGSize) {
         switch device {
-        case .portrait: (.identity, CGSize(width: 180, height: 320))
+        case .portrait: (CGAffineTransform.identity, CGSize(width: 180, height: 320))
         case .landscapeRight: (CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 320, ty: 0), CGSize(width: 320, height: 180))
         case .portraitUpsideDown: (CGAffineTransform(a: -1, b: 0, c: 0, d: -1, tx: 180, ty: 320), CGSize(width: 180, height: 320))
         case .landscapeLeft: (CGAffineTransform(a: 0, b: -1, c: 1, d: 0, tx: 0, ty: 180), CGSize(width: 320, height: 180))
@@ -288,21 +288,14 @@ extension AppModelTests {
         h.source.generate(seconds: 2)
         await second.value
         #expect(h.library.clips().count == 2)
-        let transforms = try await h.library.clips().asyncMap { url in
+        var transforms: [CGAffineTransform] = []
+        for url in h.library.clips() {
             let track = try #require(try await AVURLAsset(url: url).loadTracks(withMediaType: .video).first)
-            return try await track.load(.preferredTransform)
+            transforms.append(try await track.load(.preferredTransform))
         }
         #expect(transforms.filter { $0 == .identity }.count == 1, "one portrait clip: \(transforms)")
 
         model.stop()
         await model.waitForPipeline()
-    }
-}
-
-private extension Array {
-    func asyncMap<T>(_ transform: (Element) async throws -> T) async rethrows -> [T] {
-        var out: [T] = []
-        for element in self { out.append(try await transform(element)) }
-        return out
     }
 }
