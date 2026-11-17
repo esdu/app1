@@ -491,6 +491,9 @@ Turn on "Say “save that” to save" in RewindCam's Settings and allow Speech R
       the "Listening" row says "No — speech recognition isn't available", recording and Save carry on
       and the phone doesn't get noticeably warm. Turn Siri & Dictation back on, then turn the voice
       trigger off and on. **Pass:** "Listening" says "Yes" and "save that" saves a clip.
+- [ ] **Offline (#36)**: turn on Airplane Mode while the voice trigger listens and wait a minute.
+      **Pass:** "Listening" still says "Yes" and "save that" saves a clip (on-device recognition must not
+      count as unavailable offline; the trigger checks `SFSpeechRecognizer.isAvailable` before each session).
 
 ### 10. Accessibility (#11)
 
