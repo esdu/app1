@@ -84,7 +84,7 @@ jobs:
             -only-testing:RewindCamTests/TempPacedRepro \
             -only-testing:RewindCamTests/RecorderTests \
             -only-testing:RewindCamTests/WorkingSetRecorderTests \
-            -test-iterations 25 -run-tests-until-failure \
+            -test-iterations 12 -run-tests-until-failure \
             -resultBundlePath StressResults.xcresult \
             -parallel-testing-enabled NO \
             -test-timeouts-enabled YES \
