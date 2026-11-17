@@ -179,6 +179,9 @@ struct OrientationExportTests {
         let h = RecorderHarness(buffer: 3, audio: true, width: 180, height: 320)
         for device in DeviceOrientation.allCases {
             h.source.generate(seconds: 2)
+            // The writer hands over the init and segments asynchronously: a save before any exists finds
+            // nothing buffered. Wait for one, as a camera's user does for the badge.
+            try await h.waitForSegments(through: h.now - 1.2)
             let ticket = h.recorder.beginSave(postRoll: 0)
             h.source.generate(seconds: 2)
             let bundle = try await h.awaitBundle(ticket)
