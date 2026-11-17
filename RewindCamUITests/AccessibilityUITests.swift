@@ -238,8 +238,8 @@ final class AccessibilityUITests: XCTestCase {
         Thread.sleep(forTimeInterval: 1) // the rest of the slide
     }
 
-    /// Scrolls the Settings form to its end (the Privacy note, its last row) and waits for it to stop, so
-    /// the audit always sees the same rows in the same places.
+    /// Scrolls the Settings form until the Privacy note is on screen, then once more against the end, and
+    /// waits for it to stop. Doesn't depend on how many rows follow the note.
     @MainActor
     private func scrollSettingsToEnd(_ app: XCUIApplication, file: StaticString = #filePath, line: UInt = #line) {
         let last = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@",
@@ -418,7 +418,6 @@ final class AuditLog: @unchecked Sendable { // only touched on the main thread, 
 
     /// The dim overlay's own text (ContentView `DimOverlay`).
     static let dimOverlayTexts = ["Recording ·", "Not recording", "Tap anywhere to wake", "Volume buttons still save"]
-
 
     static func name(_ type: XCUIAccessibilityAuditType) -> String {
         let known: [(XCUIAccessibilityAuditType, String)] = [
