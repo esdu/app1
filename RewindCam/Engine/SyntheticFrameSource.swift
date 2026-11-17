@@ -54,7 +54,7 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     private var audioFailure: AudioUnavailableReason?
     private var startError: FrameSourceError?
     private var starts = 0
-    /// What each `start(_:)` was asked for, in order, including failed starts (issue #35; tests).
+    /// What each `start(_:)` was asked for, in order, including held and failed starts (issue #35; tests).
     private var requested: [CaptureConfiguration] = []
     /// What the source runs with: the last successful start's configuration; nil once stopped.
     private var runningConfig: CaptureConfiguration?
@@ -104,10 +104,11 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     /// Like `CameraFrameSource`, audio is delivered only when the configuration asks for it and the
     /// (simulated) microphone is usable; the result says which.
     func start(_ configuration: CaptureConfiguration) async throws -> ActiveCapture {
+        // Recorded on the call, so a start still held by `holdNextStart()` is listed too.
+        queue.sync { requested.append(configuration) }
         await passStartGate()
         return try queue.sync { () throws -> ActiveCapture in
             starts += 1
-            requested.append(configuration)
             if let startError {
                 // Like a camera that can't start: nothing runs afterwards.
                 timer?.cancel()
@@ -192,7 +193,8 @@ final class SyntheticFrameSource: FrameSource, @unchecked Sendable {
     /// How many times `start(_:)` was called, including failed starts (tests).
     var startCount: Int { queue.sync { starts } }
 
-    /// The configuration of every `start(_:)` call so far, in order, including failed ones (tests).
+    /// The configuration of every `start(_:)` call so far, in order, from the moment it is called:
+    /// including a start still held by `holdNextStart()`, and failed ones (tests).
     var startConfigurations: [CaptureConfiguration] { queue.sync { requested } }
 
     /// The configuration the source runs with: that of the last successful `start(_:)`, nil after
