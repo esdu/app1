@@ -16,8 +16,10 @@ struct BufferedSegment: Equatable, Sendable {
 
 /// Pure eviction policy for the rolling buffer (no I/O; the caller deletes evicted files).
 ///
-/// Keeps the minimal suffix of segments that still covers `bufferDuration`, and never
-/// holds more than `byteCap` bytes (the newest segment is always kept).
+/// Keeps the minimal suffix of segments that still covers `bufferDuration`, and never holds more than
+/// `byteCap` bytes, not even for one segment: a newest segment that alone exceeds the cap is evicted too
+/// (issue #14; the recorder refuses such fragments before they reach the ring, so this only happens when
+/// the cap shrinks in place). What is kept is always one contiguous run ending at the newest segment.
 struct SegmentRing: Sendable {
     var bufferDuration: Double
     var byteCap: Int64
@@ -43,9 +45,9 @@ struct SegmentRing: Sendable {
         var evicted: [BufferedSegment] = []
         var duration = totalDuration
         var bytes = totalBytes
-        while segments.count > 1 {
+        while !segments.isEmpty {
             let oldest = segments[0]
-            let stillCovers = duration - oldest.duration >= bufferDuration
+            let stillCovers = segments.count > 1 && duration - oldest.duration >= bufferDuration
             guard stillCovers || bytes > byteCap else { break }
             evicted.append(segments.removeFirst())
             duration -= oldest.duration

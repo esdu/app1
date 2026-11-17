@@ -30,7 +30,10 @@ enum ClipExporter {
     /// Exports to `output`, which may be outside the bundle's folder: the app writes
     /// `UnsavedClips/<name>.partial.mov` and renames it once this returns (DESIGN.md §2, "Save path").
     /// Temporary files are still written inside `bundle.directory`.
-    static func export(_ bundle: SegmentBundle, to output: URL) async throws -> ExportedClip {
+    ///
+    /// `outputByteLimit` (issue #14) is passed to the export session as `fileLengthLimit`: the output
+    /// stops near it (the session may write slightly past it; the free-space reserve covers that).
+    static func export(_ bundle: SegmentBundle, to output: URL, outputByteLimit: Int64? = nil) async throws -> ExportedClip {
         guard let last = bundle.segments.last, bundle.clipDuration > 0 else { throw ExportError.empty }
         let fm = FileManager.default
 
@@ -74,7 +77,7 @@ enum ClipExporter {
 
         // 4. Passthrough export to QuickTime.
         try? fm.removeItem(at: output)
-        try await runPassthroughExport(composition, to: output)
+        try await runPassthroughExport(composition, to: output, fileLengthLimit: outputByteLimit)
         let duration = try await AVURLAsset(url: output).load(.duration).seconds
         return ExportedClip(url: output, duration: duration)
     }
@@ -106,11 +109,12 @@ enum ClipExporter {
         }
     }
 
-    private static func runPassthroughExport(_ asset: AVAsset, to url: URL) async throws {
+    private static func runPassthroughExport(_ asset: AVAsset, to url: URL, fileLengthLimit: Int64?) async throws {
         guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
             throw ExportError.exportFailed("passthrough export unavailable")
         }
         session.shouldOptimizeForNetworkUse = false
+        if let fileLengthLimit, fileLengthLimit > 0 { session.fileLengthLimit = fileLengthLimit }
         if #available(iOS 18.0, *) {
             do {
                 try await session.export(to: url, as: .mov)
