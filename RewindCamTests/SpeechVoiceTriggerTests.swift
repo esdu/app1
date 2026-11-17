@@ -49,7 +49,7 @@ final class FakeRecognitionEngine: RecognitionEngine, @unchecked Sendable {
     let isAvailable: Bool
     private let errorOnCancel: Bool
     private let sessionsBox = Locked<[Session]>([])
-    private let control = Locked((ready: true, behaviour: StartBehaviour.normal, startAttempts: 0, readyChecks: 0))
+    private let control = Locked((behaviour: StartBehaviour.normal, startAttempts: 0))
 
     init(isAvailable: Bool = true, errorOnCancel: Bool = false) {
         self.isAvailable = isAvailable
@@ -60,14 +60,6 @@ final class FakeRecognitionEngine: RecognitionEngine, @unchecked Sendable {
     var sessions: [Session] { sessionsBox.current }
     /// Calls to `startSession`, including those that returned nil.
     var startAttempts: Int { control.current.startAttempts }
-    /// Reads of `isReady`: one per session the trigger wanted to start.
-    var readyChecks: Int { control.current.readyChecks }
-
-    /// `SFSpeechRecognizer.isAvailable`.
-    var isReady: Bool {
-        get { control.withLock { c -> Bool in c.readyChecks += 1; return c.ready } }
-        set { control.withLock { $0.ready = newValue } }
-    }
 
     var behaviour: StartBehaviour {
         get { control.current.behaviour }

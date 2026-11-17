@@ -866,10 +866,11 @@ at the 60 fps bitrate (README "Known limits"; the device checklist checks it).
   only exercised on a device.
 * **Sessions that keep failing (issue #36).** A session *fails* if it ends (an error, or a final
   callback) less than `healthyRunTime` (10 s) after it was requested without having produced any
-  transcript; so does one that can't be started (`SFSpeechRecognizer.isAvailable` false, which is
-  checked first, or `startSession` returns nil) and one whose task reports an error before
-  `beginSession` stored it (recorded while the session is "starting", then that session is dropped
-  instead of being fed audio). Consecutive failures restart on the capture-recovery `RestartBackoff`
+  transcript; so does one that can't be started (`startSession` returns nil) and one whose task reports
+  an error before `beginSession` stored it (recorded while the session is "starting", then that session
+  is dropped instead of being fed audio). `SFSpeechRecognizer.isAvailable` is deliberately not checked: it may read
+  false offline, where on-device recognition still works, and a task that can't run fails fast and is
+  counted anyway. Consecutive failures restart on the capture-recovery `RestartBackoff`
   schedule (at once, then after 1, 2, 4, 8 and 15 s) through the injected `DelayScheduler`; the
   failure after that, 7 sessions and about 30 s in, gives up. Any transcript refills the budget. All
   other ends are healthy and restart at once as before: a final result, the 50 s recycle, a trigger, and
@@ -882,7 +883,7 @@ at the 60 fps bitrate (README "Known limits"; the device checklist checks it).
   available." A toast, not a banner: as with a denied Speech Recognition prompt, recording and Save are
   unaffected and the Settings row keeps the reason. It starts again with a full budget the next time
   recording starts or resumes, or when the toggle is turned off and on. `VoiceTriggerFailureTests`
-  covers the schedule, the reset, nil and not-ready sessions, early failures, stale callbacks, and the
+  covers the schedule, the reset, nil sessions, early failures, stale callbacks, and the
   app's side; how often a real recogniser fails this way is only seen on a device.
 * Phrase matching (`VoicePhrase`) is a pure function on word boundaries: "save that" and "save this".
 * **Battery cost** can't be measured in CI (the Simulator has no battery). The app measures it instead:

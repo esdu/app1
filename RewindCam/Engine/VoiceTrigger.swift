@@ -55,9 +55,6 @@ protocol RecognitionSession: AnyObject, Sendable {
 protocol RecognitionEngine: Sendable {
     /// True only when on-device recognition is supported; we never fall back to the server.
     var isAvailable: Bool { get }
-    /// True when the recogniser can take a request right now (`SFSpeechRecognizer.isAvailable`). It can
-    /// be false for a while on a device that supports recognition; the trigger then backs off (#36).
-    var isReady: Bool { get }
     /// Starts a new request and task; `onUpdate` receives every callback of that task.
     func startSession(onUpdate: @escaping @Sendable (RecognitionUpdate) -> Void) -> (any RecognitionSession)?
 }
@@ -68,7 +65,6 @@ final class SpeechRecognitionEngine: RecognitionEngine, @unchecked Sendable {
     private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
 
     var isAvailable: Bool { recognizer?.supportsOnDeviceRecognition == true }
-    var isReady: Bool { recognizer?.isAvailable == true }
 
     /// The request every session uses.
     static func makeRequest() -> SFSpeechAudioBufferRecognitionRequest {
@@ -81,7 +77,7 @@ final class SpeechRecognitionEngine: RecognitionEngine, @unchecked Sendable {
     }
 
     func startSession(onUpdate: @escaping @Sendable (RecognitionUpdate) -> Void) -> (any RecognitionSession)? {
-        guard let recognizer, recognizer.supportsOnDeviceRecognition, recognizer.isAvailable else { return nil }
+        guard let recognizer, recognizer.supportsOnDeviceRecognition else { return nil }
         let request = Self.makeRequest()
         let task = recognizer.recognitionTask(with: request) { result, error in
             onUpdate(RecognitionUpdate(transcript: result?.bestTranscription.formattedString,
@@ -121,10 +117,11 @@ private final class SpeechRecognitionSession: RecognitionSession, @unchecked Sen
 ///
 /// **Sessions that keep failing (issue #36).** A session *fails* when it ends (an error or a final
 /// callback) without having produced any transcript, less than `healthyRunTime` after it was
-/// requested. A session that can't be started (the recogniser isn't ready, or `startSession` returns
-/// nil) fails too, and so does one whose task ends before `beginSession` has stored it. Consecutive
-/// failures are restarted on the `RestartBackoff` schedule: at once, then after 1, 2, 4, 8 and 15 s,
-/// through the injected `DelayScheduler`. The failure after that gives up: the trigger stops, as after
+/// requested. A session that can't be started (`startSession` returns nil) fails too, and so does one
+/// whose task ends before `beginSession` has stored it. (`SFSpeechRecognizer.isAvailable` is not
+/// checked: on-device recognition must keep working offline, and a task that can't run fails fast.)
+/// Consecutive failures are restarted on the `RestartBackoff` schedule: at once, then after 1, 2, 4, 8
+/// and 15 s, through the injected `DelayScheduler`. The failure after that gives up: the trigger stops, as after
 /// `stop()`, and calls `onGiveUp` once. Any transcript refills the budget. Every other end (a final
 /// result, an error after a transcript or after `healthyRunTime`, the 50 s recycle, a trigger) is
 /// healthy and restarts at once, as before.
@@ -240,13 +237,7 @@ final class SpeechVoiceTrigger: VoiceTrigger, @unchecked Sendable {
             return s.generation
         }
         guard let generation = next else { return }
-        // Not ready: don't ask for a session that can only fail; it counts as a failed one.
-        let started: (any RecognitionSession)?
-        if engine.isReady {
-            started = engine.startSession { [weak self] update in self?.handle(update, generation: generation) }
-        } else {
-            started = nil
-        }
+        let started = engine.startSession { [weak self] update in self?.handle(update, generation: generation) }
         enum Outcome { case kept, stale, ended(Next) }
         let outcome = state.withLock { s -> Outcome in
             // stop() or another restart got in first: this session is already stale.

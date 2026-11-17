@@ -193,35 +193,6 @@ struct VoiceTriggerFailureTests {
         t.trigger.stop()
     }
 
-    @Test("Recogniser not ready (SFSpeechRecognizer.isAvailable false): no session is requested; same backoff")
-    func recogniserUnavailable() throws {
-        let t = Setup()
-        t.engine.isReady = false
-        t.start()
-        #expect(t.engine.readyChecks == 2)
-        #expect(t.engine.startAttempts == 0, "no task is requested from a recogniser that isn't ready")
-        for delay in RestartBackoff.delays.dropFirst() {
-            #expect(t.gaveUp.current == 0)
-            t.scheduler.advance(by: delay)
-        }
-        #expect(t.engine.readyChecks == 1 + Self.restarts)
-        #expect(t.engine.startAttempts == 0)
-        #expect(t.gaveUp.current == 1)
-        #expect(t.scheduler.pendingCount == 0)
-
-        // Ready again during a wait: the next restart starts a session that hears the phrase.
-        t.start()
-        t.scheduler.advance(by: 1)
-        #expect(t.engine.readyChecks == 4 + Self.restarts)
-        t.engine.isReady = true
-        t.scheduler.advance(by: 2)
-        #expect(t.engine.sessions.count == 1)
-        t.engine.sessions[0].say("save that")
-        #expect(t.fired.current == 1)
-        #expect(t.gaveUp.current == 1)
-        t.trigger.stop()
-    }
-
     @Test("A failure delivered before the session is stored ends that session; it never receives audio")
     func failureBeforeSessionIsStored() throws {
         // errorOnCancel: each cancelled session reports its cancellation error too (stale by then).
