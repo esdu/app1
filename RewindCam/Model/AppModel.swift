@@ -560,10 +560,10 @@ final class AppModel {
         if lowSpace {
             let free = BufferMath.formatted(bytes: available ?? 0)
             let need = BufferMath.formatted(bytes: diskPolicy.requiredBytesToSave)
-            showToast("Storage is low: about \(free) free, and this save can need up to \(need). "
-                      + "Saving anyway; the clip may end early or fail."
-                      + (recordingMore ? " Recording \(settings.postRollSeconds) s more…" : ""),
-                      isWarning: true)
+            var message = "Storage is low: about \(free) free, and this save can need up to \(need). "
+            message += "Saving anyway; the clip may end early or fail."
+            if recordingMore { message += " Recording \(settings.postRollSeconds) s more…" }
+            showToast(message, isWarning: true)
         } else if recordingMore {
             showToast("Saving… recording \(settings.postRollSeconds) s more")
         }
@@ -618,9 +618,9 @@ final class AppModel {
             // Includes a post-roll settled with nothing buffered because video stopped (#9):
             // `RecorderError.videoStopped` says to save again once recording is back.
             environment.haptics.failure()
-            showToast(error.localizedDescription
-                      + (lowSpace ? " Storage is low: free up space (\(Self.storageHint)), then save again." : ""),
-                      isError: true)
+            var message = error.localizedDescription
+            if lowSpace { message += " Storage is low: free up space (\(Self.storageHint)), then save again." }
+            showToast(message, isError: true)
             return
         }
         let clip = exported.clip

@@ -178,28 +178,34 @@ private struct DiskFitNote: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        if let note {
+            Label(note.text, systemImage: note.systemImage)
+                .font(.footnote)
+                .foregroundStyle(note.color)
+                .accessibilityIdentifier("diskFitNote")
+        }
+    }
+
+    private var note: (text: String, systemImage: String, color: Color)? {
         let seconds = model.settings.bufferSeconds
+        let preset = model.activePreset.description
         let policy = model.diskPolicy
         let check = model.diskSpaceCheck(bufferSeconds: seconds)
         let toFree = BufferMath.formatted(bytes: check.bytesToFree)
+        let where_ = AppModel.storageHint
         switch check.level {
         case .tooLow:
-            Label("Doesn't fit: \(seconds) s at \(model.activePreset.description) needs about "
-                  + "\(BufferMath.formatted(bytes: policy.requiredBytesToBuffer)) free. Free up about \(toFree) "
-                  + "(\(AppModel.storageHint)), or choose a shorter buffer or lower quality.",
-                  systemImage: "externaldrive.badge.xmark")
-                .font(.footnote)
-                .foregroundStyle(.red)
-                .accessibilityIdentifier("diskFitNote")
+            let needs = BufferMath.formatted(bytes: policy.requiredBytesToBuffer)
+            let text = "Doesn't fit: \(seconds) s at \(preset) needs about \(needs) free. "
+                + "Free up about \(toFree) (\(where_)), or choose a shorter buffer or lower quality."
+            return (text, "externaldrive.badge.xmark", .red)
         case .saveMayNotFit:
-            Label("The buffer fits, but a save can need up to \(BufferMath.formatted(bytes: policy.requiredBytesToSave)) "
-                  + "more and may not fit. Free up about \(toFree) (\(AppModel.storageHint)).",
-                  systemImage: "externaldrive.badge.exclamationmark")
-                .font(.footnote)
-                .foregroundStyle(.orange)
-                .accessibilityIdentifier("diskFitNote")
+            let save = BufferMath.formatted(bytes: policy.requiredBytesToSave)
+            let text = "The buffer fits, but a save can need up to \(save) more and may not fit. "
+                + "Free up about \(toFree) (\(where_))."
+            return (text, "externaldrive.badge.exclamationmark", .orange)
         case .enough:
-            EmptyView()
+            return nil
         }
     }
 }
