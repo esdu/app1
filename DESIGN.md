@@ -748,12 +748,14 @@ Each change restarts the writer (new generation), and the UI shows a banner such
 * **Checks.** `AccessibilityUITests` launches at the largest text size with three banners and checks the
   controls stay on screen, hittable and apart (screenshots `a11y-*`), and runs Xcode's
   `performAccessibilityAudit()` on the main screen (recording, dimmed, paused) and Settings. Contrast
-  is audited on the paused screen (black preview), not over the synthetic colour bars. The other
+  is audited on the paused screen (black preview), not over the synthetic colour bars, and in Settings
+  at the top only: scrolled down, the audit scrolls the Form to reveal the row under the navigation bar
+  and measures contrast while rows still move, which gave random failures. The other
   exclusions, each with its reason in `AuditLog.excuse`: Dynamic Type results for the deliberately
   capped elements; "partially unsupported" Dynamic Type for text the largest-text test shows wrapping
   at full size (banners, dim overlay, Settings rows, Done); issues in the Settings Form that XCUITest
   can't attach to any element (UIKit internals of system controls; the segmented pickers become menus
-  at accessibility sizes); Settings rows faded under the navigation bar's scroll-edge effect; on the
+  at accessibility sizes); on the
   dimmed screen, the contrast of the controls the overlay covers on purpose (the audit measures them
   although they are hidden from VoiceOver; the overlay's own text must pass); and text cut by the
   screen edge in a scrolling list, or by the scrolling banner area's faded edge; and "potentially inaccessible text" with no element (the timestamp

@@ -690,9 +690,12 @@ private struct DimOverlay: View {
                     .font(.footnote)
             }
             .multilineTextAlignment(.center)
-            .padding(.horizontal, 24)
-            // Dim on purpose, but well above 4.5:1 on the overlay's near-black.
-            .foregroundStyle(.white.opacity(0.7))
+            // Dim on purpose, but well above 4.5:1: the text sits on solid black, so its contrast doesn't
+            // depend on the footage that shows faintly through the rest of the overlay.
+            .foregroundStyle(.white.opacity(0.75))
+            .padding(16)
+            .background(Color.black, in: RoundedRectangle(cornerRadius: 16))
+            .padding(.horizontal, 8)
         }
         .contentShape(Rectangle())
         .onTapGesture { model.setDimmed(false) }
