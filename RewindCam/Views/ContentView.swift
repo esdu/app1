@@ -1,5 +1,16 @@
 import SwiftUI
 
+// Accessibility (issue #11; DESIGN.md "Accessibility"):
+// * Every text uses a text style and scales with Dynamic Type. Where a fixed shape has to hold it (the
+//   status pills, the round icon buttons, the Save circle) the size is capped at an accessibility size
+//   and the element shows the large content viewer; everything else scales freely.
+// * The banner stack scrolls when it doesn't fit (`BannerArea`), so at the largest sizes it never
+//   pushes the Save row off screen or overlaps it.
+// * Text sits on a dark base (scrims, black pill and banner backgrounds), so it keeps at least 4.5:1
+//   contrast over any footage; button fills are darkened system colours with white text (≥ 5:1).
+// * VoiceOver: one element per pill, banner text and toast, with labels that read as sentences;
+//   buttons stay separately focusable; state changes and save results are announced by `AppModel`.
+
 struct ContentView: View {
     @Environment(AppModel.self) private var model
     @State private var showSettings = false
@@ -32,20 +43,29 @@ struct ContentView: View {
 
             VStack(spacing: 10) {
                 StatusBar()
-                Banners()
-                Spacer()
+                    .fixedSize(horizontal: false, vertical: true)
+                // Takes the room left by the fixed-height rows first, and scrolls when that's not enough.
+                BannerArea()
+                    .layoutPriority(1)
+                Spacer(minLength: 0)
                 ToastView()
-                Spacer()
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
                 Controls(showSettings: $showSettings)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Keep RewindCam open — iOS can't record in the background.")
                     .font(.caption2)
-                    .foregroundStyle(.white.opacity(0.75))
+                    .foregroundStyle(.white.opacity(0.85))
                     .multilineTextAlignment(.center)
+                    // A reminder, not news: capped so it can't crowd out the banners at the largest sizes.
+                    .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                    .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("backgroundNotice")
                 if model.isUITest {
                     Text("Fake library: \(model.fakeLibraryCount)")
                         .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.75))
+                        .foregroundStyle(.white.opacity(0.85))
+                        .dynamicTypeSize(...DynamicTypeSize.large)
                         .accessibilityIdentifier("fakeLibraryCount")
                         .accessibilityValue("\(model.fakeLibraryCount)")
                 }
@@ -64,27 +84,75 @@ struct ContentView: View {
     }
 }
 
-private struct StatusBar: View {
-    @Environment(AppModel.self) private var model
+/// Text-on-colour fills that keep white text at ≥ 4.5:1 (the system red, orange and blue don't).
+enum ContrastPalette {
+    static let red = Color(red: 0.75, green: 0.10, blue: 0.10)
+    static let orange = Color(red: 0.66, green: 0.31, blue: 0.0)
+    static let blue = Color(red: 0.0, green: 0.35, blue: 0.80)
+    /// Disabled Save: dark enough for its white "not recording" subtitle over bright footage.
+    static let disabledFill = Color(white: 0.22).opacity(0.9)
+}
 
+private struct StatusBar: View {
     var body: some View {
-        HStack(spacing: 8) {
-            RecordingBadge()
-            Spacer(minLength: 4)
-            Text("Buffer \(model.settings.bufferSeconds) s")
-                .accessibilityIdentifier("bufferLabel")
-                .pill()
-            Text(model.activePreset.description)
-                .accessibilityIdentifier("presetLabel")
-                .pill()
-            BatteryLabel()
+        // One row when it fits; at large text sizes two rows (state + battery, then buffer + quality).
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                RecordingBadge()
+                Spacer(minLength: 4)
+                BufferPill()
+                PresetPill()
+                BatteryLabel()
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 8) {
+                    RecordingBadge()
+                    Spacer(minLength: 4)
+                    BatteryLabel()
+                }
+                HStack(spacing: 8) {
+                    BufferPill()
+                    PresetPill()
+                    Spacer(minLength: 0)
+                }
+            }
         }
         .font(.footnote.weight(.semibold).monospacedDigit())
-        // One row: a long phase label ("STARTING") shrinks a little instead of wrapping the pills.
+        // Pills hold one line each. A long phase label ("STARTING") shrinks a little instead of wrapping.
         .lineLimit(1)
         .minimumScaleFactor(0.75)
         .foregroundStyle(.white)
+        // Capped: a status bar can't grow without bound. Long-press shows the large content viewer.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility1)
         .padding(.top, 4)
+    }
+}
+
+private struct BufferPill: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let seconds = model.settings.bufferSeconds
+        Text("Buffer \(seconds) s")
+            .pill()
+            .accessibilityLabel("Buffer length \(seconds) seconds")
+            .accessibilityShowsLargeContentViewer()
+            .accessibilityIdentifier("bufferLabel")
+    }
+}
+
+private struct PresetPill: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let preset = model.activePreset
+        let lowered = preset != model.settings.preset
+        Text(preset.description)
+            .pill()
+            .accessibilityLabel("\(preset.resolution.label), \(preset.frameRate.rawValue) frames per second"
+                + (lowered ? ", lowered while the phone is hot" : ""))
+            .accessibilityShowsLargeContentViewer()
+            .accessibilityIdentifier("presetLabel")
     }
 }
 
@@ -107,16 +175,32 @@ private struct RecordingBadge: View {
         }
         .pill()
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(accessibilityText)
+        .accessibilityLabel(accessibilityLabel)
+        .accessibilityValue(recording ? Self.secondsReady(model.readySeconds) : "")
+        .accessibilityAddTraits(recording ? .updatesFrequently : [])
+        .accessibilityShowsLargeContentViewer {
+            Label(recording ? "REC \(model.readySeconds) s" : phaseLabel,
+                  systemImage: model.phase == .userPaused ? "pause.fill" : "record.circle")
+        }
         .accessibilityIdentifier("recordingBadge")
     }
 
-    private var accessibilityText: String {
+    static func secondsReady(_ seconds: Int) -> String {
+        seconds == 1 ? "1 second ready" : "\(seconds) seconds ready"
+    }
+
+    /// What VoiceOver reads: words, not the badge's abbreviations ("REC", "OFF").
+    private var accessibilityLabel: String {
         switch model.phase {
-        case .recording: "REC \(model.readySeconds) s"
+        case .idle: "Not recording"
+        case .starting: "Starting"
+        case .recording: "Recording"
+        case .paused: "Recording paused"
+        case .cameraDenied: "Not recording, camera access is off"
+        case .failed: "Not recording, camera error"
+        case .outOfSpace: "Not recording, not enough free space"
         // Not to be confused with an interruption's PAUSED (issue #15).
         case .userPaused: "Paused by you"
-        default: phaseLabel
         }
     }
 
@@ -139,13 +223,18 @@ private struct BatteryLabel: View {
 
     var body: some View {
         let level = model.batteryLevel
+        let percent = level.map { Int(($0 * 100).rounded()) }
         HStack(spacing: 3) {
             Image(systemName: symbol(level))
-            Text(level.map { "\(Int(($0 * 100).rounded()))%" } ?? "—")
+            Text(percent.map { "\($0)%" } ?? "—")
         }
         .pill()
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(level.map { "Battery \(Int($0 * 100)) percent" } ?? "Battery unknown")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(percent.map { "Battery \($0) percent" + (model.isCharging ? ", charging" : "") }
+            ?? "Battery level unknown")
+        .accessibilityShowsLargeContentViewer {
+            Label(percent.map { "\($0)%" } ?? "—", systemImage: symbol(level))
+        }
         .accessibilityIdentifier("batteryLabel")
     }
 
@@ -158,6 +247,21 @@ private struct BatteryLabel: View {
         case ..<0.65: return "battery.50percent"
         case ..<0.9: return "battery.75percent"
         default: return "battery.100percent"
+        }
+    }
+}
+
+/// The banners at their natural height when they fit; otherwise a scroll view in the room that is left
+/// (large text, or several banners at once), so they never run into the Save row.
+private struct BannerArea: View {
+    var body: some View {
+        ViewThatFits(in: .vertical) {
+            Banners()
+            ScrollView {
+                Banners()
+            }
+            .scrollBounceBehavior(.basedOnSize)
+            .accessibilityIdentifier("bannerScroll")
         }
     }
 }
@@ -209,7 +313,8 @@ private struct Banners: View {
 
 /// Renders an `AppNotice`: icon, title, message and its action button (e.g. **Open Settings**).
 /// Reusable for any notice; the banner's identifier is `notice.id`, the button's is
-/// `notice.action.accessibilityIdentifier` (`openSettingsButton`).
+/// `notice.action.accessibilityIdentifier` (`openSettingsButton`). VoiceOver reads the title and
+/// message as one element (the icon is decorative), and the button is a separate element.
 struct NoticeBanner: View {
     @Environment(AppModel.self) private var model
     let notice: AppNotice
@@ -220,38 +325,34 @@ struct NoticeBanner: View {
         case .warning: .orange
         case .info: .blue
         }
-        HStack(spacing: 10) {
+        let buttonFill: Color = switch notice.severity {
+        case .error: ContrastPalette.red
+        case .warning: ContrastPalette.orange
+        case .info: ContrastPalette.blue
+        }
+        BannerLayout {
             Image(systemName: notice.systemImage)
                 .accessibilityHidden(true)
+        } text: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(notice.title)
                     .fontWeight(.semibold)
                 Text(notice.message)
                     .font(.caption)
-                    .opacity(0.9)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .accessibilityElement(children: .combine)
+        } button: {
             if let action = notice.action {
                 Button {
                     perform(action)
                 } label: {
                     Text(action.title)
                         .fontWeight(.bold)
-                        .lineLimit(1)
-                        .fixedSize()
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(tint)
-                .controlSize(.small)
+                .bannerButton(fill: buttonFill)
                 .accessibilityIdentifier(action.accessibilityIdentifier)
             }
         }
-        .font(.footnote.weight(.medium))
-        .foregroundStyle(.white)
-        .padding(10)
-        .background(tint.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(tint.opacity(0.8), lineWidth: 1))
+        .bannerBackground(tint)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier(notice.id)
     }
@@ -271,18 +372,19 @@ private struct UnsavedClipsBanner: View {
 
     var body: some View {
         let count = model.unsavedClips.count
-        HStack(spacing: 10) {
+        BannerLayout {
             Image(systemName: "tray.and.arrow.up.fill")
+                .accessibilityHidden(true)
+        } text: {
             VStack(alignment: .leading, spacing: 2) {
                 Text(count == 1 ? "1 clip isn't in Photos yet." : "\(count) clips aren't in Photos yet.")
                     .fontWeight(.semibold)
                 if let problem = model.photosProblem {
                     Text(problem)
                         .font(.caption)
-                        .opacity(0.9)
                 }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+        } button: {
             Button {
                 model.retryUnsavedClips()
             } label: {
@@ -292,20 +394,46 @@ private struct UnsavedClipsBanner: View {
                     Text("Retry").fontWeight(.bold)
                 }
             }
-            .buttonStyle(.borderedProminent)
-            .tint(.orange)
-            .controlSize(.small)
+            .bannerButton(fill: ContrastPalette.orange)
             .disabled(model.isRetryingUnsaved)
             .accessibilityLabel("Retry saving to Photos")
+            .accessibilityValue(model.isRetryingUnsaved ? "In progress" : "")
             .accessibilityIdentifier("retryUnsavedButton")
         }
-        .font(.footnote.weight(.medium))
-        .foregroundStyle(.white)
-        .padding(10)
-        .background(Color.orange.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.orange.opacity(0.8), lineWidth: 1))
+        .bannerBackground(.orange)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("unsavedBanner")
+    }
+}
+
+/// Icon, text and an optional button side by side; at accessibility text sizes the button goes under
+/// the text, so a long button title ("Open Settings") can't squeeze the text into a sliver.
+private struct BannerLayout<Icon: View, Content: View, Action: View>: View {
+    @Environment(\.dynamicTypeSize) private var typeSize
+    let icon: Icon
+    let text: Content
+    let button: Action
+
+    init(@ViewBuilder icon: () -> Icon, @ViewBuilder text: () -> Content, @ViewBuilder button: () -> Action) {
+        self.icon = icon()
+        self.text = text()
+        self.button = button()
+    }
+
+    var body: some View {
+        let stacked = typeSize.isAccessibilitySize
+        let layout = stacked ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 10))
+        layout {
+            HStack(alignment: .top, spacing: 10) {
+                icon
+                text
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityElement(children: .combine)
+            }
+            button
+        }
     }
 }
 
@@ -316,40 +444,50 @@ private struct Banner: View {
 
     var body: some View {
         Label(text, systemImage: icon)
-            .font(.footnote.weight(.medium))
-            .foregroundStyle(.white)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(10)
-            .background(tint.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(tint.opacity(0.8), lineWidth: 1))
+            .fixedSize(horizontal: false, vertical: true)
+            .bannerBackground(tint)
+            .accessibilityElement(children: .combine)
     }
 }
 
 private struct ToastView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        if let toast = model.toast {
-            Label(toast.message, systemImage: toast.isError ? "xmark.octagon.fill"
-                  : toast.isWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                .font(.callout.weight(.semibold))
-                .foregroundStyle(.white)
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-                .background(.black.opacity(0.75), in: Capsule())
-                .overlay(Capsule().stroke(toast.isError ? Color.red : toast.isWarning ? Color.orange : Color.green,
-                                          lineWidth: 1.5))
-                .accessibilityElement(children: .combine)
-                .accessibilityIdentifier("toast")
-                .id(toast.id)
-                .transition(.opacity)
+        VStack {
+            if let toast = model.toast {
+                Label(toast.message, systemImage: toast.isError ? "xmark.octagon.fill"
+                      : toast.isWarning ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                    .font(.callout.weight(.semibold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                    .background(.black.opacity(0.8), in: RoundedRectangle(cornerRadius: 22))
+                    .overlay(RoundedRectangle(cornerRadius: 22)
+                        .stroke(toast.isError ? Color.red : toast.isWarning ? Color.orange : Color.green,
+                                lineWidth: 1.5))
+                    // The toast is spoken by `AppModel.showToast`; this keeps it readable at the largest
+                    // sizes without taking the whole screen.
+                    .dynamicTypeSize(...DynamicTypeSize.accessibility3)
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("toast")
+                    .id(toast.id)
+                    .transition(.opacity)
+            }
         }
+        // A short cross-fade, and none at all with Reduce Motion.
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.2), value: model.toast?.id)
     }
 }
 
 private struct Controls: View {
     @Environment(AppModel.self) private var model
     @Binding var showSettings: Bool
+    /// The Save circle grows with the text inside it, up to a size that still fits beside the two round
+    /// buttons on the smallest supported iPhone (375 pt wide: 60 + 168 + 60 + gaps).
+    @ScaledMetric(relativeTo: .title2) private var scaledSaveDiameter: CGFloat = 128
 
     var body: some View {
         VStack(spacing: 14) {
@@ -358,11 +496,15 @@ private struct Controls: View {
         }
     }
 
+    private var saveDiameter: CGFloat { min(max(scaledSaveDiameter, 128), 168) }
+
     private var mainRow: some View {
         // Nothing is buffered unless recording, so Save is disabled and says why (issue #8).
         let unavailable = model.saveUnavailableReason
         return HStack(alignment: .center) {
-            RoundIconButton(systemImage: "moon.fill", label: "Dim screen") {
+            RoundIconButton(systemImage: "moon.fill", label: "Dim screen",
+                            hint: model.isUserPaused ? "Not available while paused."
+                                : "Darkens the screen. Recording continues; tap anywhere to wake.") {
                 model.setDimmed(true)
             }
             // Nothing to keep the screen on for while the user has paused (issue #15).
@@ -370,7 +512,7 @@ private struct Controls: View {
             .opacity(model.isUserPaused ? 0.4 : 1)
             .accessibilityIdentifier("dimButton")
 
-            Spacer()
+            Spacer(minLength: 8)
 
             Button {
                 model.save()
@@ -379,28 +521,40 @@ private struct Controls: View {
                     if model.isSaving {
                         ProgressView().tint(.white)
                     } else {
-                        Text("SAVE").font(.title2.weight(.heavy))
+                        Text("SAVE")
+                            .font(.title2.weight(.heavy))
+                            .lineLimit(1)
                     }
                     Text(unavailable == nil ? saveSubtitle : unavailableSubtitle)
                         .font(.caption2.weight(.semibold))
                         .multilineTextAlignment(.center)
+                        .lineLimit(2)
                 }
-                .foregroundStyle(.white.opacity(unavailable == nil ? 1 : 0.7))
-                .frame(width: 128, height: 128)
-                .background(Circle().fill(unavailable == nil ? Color.red : Color.gray.opacity(0.45)))
+                .minimumScaleFactor(0.6)
+                // Capped so it fits the circle; VoiceOver and the large content viewer read "Save".
+                .dynamicTypeSize(...DynamicTypeSize.accessibility1)
+                .padding(18)
+                .foregroundStyle(.white.opacity(unavailable == nil ? 1 : 0.85))
+                .frame(width: saveDiameter, height: saveDiameter)
+                .background(Circle().fill(unavailable == nil ? ContrastPalette.red : ContrastPalette.disabledFill))
                 .overlay(Circle().stroke(.white.opacity(unavailable == nil ? 1 : 0.45), lineWidth: 4))
                 .shadow(radius: 8)
+                .contentShape(Circle())
             }
             .buttonStyle(.plain)
             .disabled(unavailable != nil)
             .accessibilityLabel("Save")
-            .accessibilityHint(unavailable
-                ?? "Saves the last \(model.settings.bufferSeconds) seconds to Photos")
+            // Read right after "Save, dimmed": why it can't save now. Saving: that it is busy.
+            .accessibilityValue(unavailable ?? (model.isSaving ? "Saving" : ""))
+            .accessibilityHint(unavailable == nil ? saveHint : "")
+            .accessibilityShowsLargeContentViewer {
+                Label("Save", systemImage: "record.circle")
+            }
             .accessibilityIdentifier("saveButton")
 
-            Spacer()
+            Spacer(minLength: 8)
 
-            RoundIconButton(systemImage: "gearshape.fill", label: "Settings") {
+            RoundIconButton(systemImage: "gearshape.fill", label: "Settings", hint: nil) {
                 showSettings = true
             }
             .accessibilityIdentifier("settingsButton")
@@ -419,6 +573,12 @@ private struct Controls: View {
     private var saveSubtitle: String {
         let post = model.settings.postRollSeconds
         return post > 0 ? "last \(model.settings.bufferSeconds) s\n+ \(post) s after" : "last \(model.settings.bufferSeconds) s"
+    }
+
+    private var saveHint: String {
+        let post = model.settings.postRollSeconds
+        return "Saves the last \(model.settings.bufferSeconds) seconds to Photos"
+            + (post > 0 ? ", and keeps recording \(post) seconds more." : ".")
     }
 }
 
@@ -441,13 +601,18 @@ private struct PauseResumeButton: View {
         } label: {
             Label(paused ? "Resume" : "Pause", systemImage: paused ? "play.fill" : "pause.fill")
                 .font(.subheadline.weight(.bold))
+                .lineLimit(1)
                 .foregroundStyle(.white)
                 .padding(.horizontal, 18)
+                .padding(.vertical, 6)
                 .frame(minHeight: 44)
-                .background(Capsule().fill(paused ? Color.blue : Color.black.opacity(0.55)))
-                .overlay(Capsule().stroke(.white.opacity(paused ? 0.9 : 0.4), lineWidth: 1))
+                .background(Capsule().fill(paused ? ContrastPalette.blue : Color.black.opacity(0.65)))
+                .overlay(Capsule().stroke(.white.opacity(paused ? 0.9 : 0.5), lineWidth: 1))
+                .contentShape(Capsule())
         }
         .buttonStyle(.plain)
+        // Scales well past the default sizes, but not so far that the Save row runs out of room.
+        .dynamicTypeSize(...DynamicTypeSize.accessibility3)
         .accessibilityLabel(paused ? "Resume recording" : "Pause recording")
         .accessibilityHint(paused
             ? "Turns the camera back on and starts filling the buffer again."
@@ -465,46 +630,64 @@ private struct PauseResumeButton: View {
 private struct RoundIconButton: View {
     let systemImage: String
     let label: String
+    let hint: String?
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.title2)
+                // The 60 pt circle holds the symbol up to this size; long-press shows it larger.
+                .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
                 .foregroundStyle(.white)
                 .frame(width: 60, height: 60)
-                .background(Circle().fill(.black.opacity(0.55)))
-                .overlay(Circle().stroke(.white.opacity(0.4), lineWidth: 1))
+                .background(Circle().fill(.black.opacity(0.65)))
+                .overlay(Circle().stroke(.white.opacity(0.5), lineWidth: 1))
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(label)
+        .accessibilityHint(hint ?? "")
+        .accessibilityShowsLargeContentViewer {
+            Label(label, systemImage: systemImage)
+        }
     }
 }
 
+/// While dimmed, VoiceOver sees one button: double-tap wakes the screen, and a **Save** custom action
+/// saves without waking it (the volume buttons save too).
 private struct DimOverlay: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        let recording = model.phase == .recording
         ZStack {
             Color.black.opacity(0.92).ignoresSafeArea()
             VStack(spacing: 12) {
                 HStack(spacing: 6) {
-                    Circle().fill(model.phase == .recording ? Color.red : Color.gray).frame(width: 8, height: 8)
-                    Text(model.phase == .recording ? "Recording · \(model.readySeconds) s ready" : "Not recording")
+                    Circle().fill(recording ? Color.red : Color.gray).frame(width: 8, height: 8)
+                    Text(recording ? "Recording · \(model.readySeconds) s ready" : "Not recording")
                 }
                 Text("Tap anywhere to wake")
                     .font(.footnote)
                 Text("Volume buttons still save")
                     .font(.caption2)
-                    .opacity(0.7)
             }
-            .foregroundStyle(.white.opacity(0.55))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 24)
+            // Dim on purpose, but still ≥ 4.5:1 on the overlay's near-black.
+            .foregroundStyle(.white.opacity(0.6))
         }
         .contentShape(Rectangle())
         .onTapGesture { model.setDimmed(false) }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Screen dimmed. Tap to wake.")
+        .accessibilityLabel("Screen dimmed")
+        .accessibilityValue(recording ? "Recording, " + RecordingBadge.secondsReady(model.readySeconds)
+            : "Not recording")
+        .accessibilityHint("Double-tap to wake the screen. The Save action, and the volume buttons, save without waking it.")
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction { model.setDimmed(false) }
+        .accessibilityAction(named: "Save") { model.save() }
         .accessibilityIdentifier("dimOverlay")
     }
 }
@@ -513,6 +696,30 @@ private extension View {
     func pill() -> some View {
         padding(.horizontal, 8)
             .padding(.vertical, 5)
-            .background(.black.opacity(0.55), in: Capsule())
+            .background(.black.opacity(0.65), in: Capsule())
+    }
+
+    /// Banner text on a near-black base with a tint on top: white text keeps ≥ 4.5:1 over any footage.
+    func bannerBackground(_ tint: Color) -> some View {
+        font(.footnote.weight(.medium))
+            .foregroundStyle(.white)
+            .padding(10)
+            .background {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(.black.opacity(0.8))
+                    .overlay(RoundedRectangle(cornerRadius: 12).fill(tint.opacity(0.35)))
+            }
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(tint.opacity(0.8), lineWidth: 1))
+    }
+
+    /// White on a darkened fill (≥ 5:1); `.large` makes it at least 44 pt tall. Takes its width before
+    /// the text beside it, and shrinks a little rather than overflow at the largest sizes.
+    func bannerButton(fill: Color) -> some View {
+        buttonStyle(.borderedProminent)
+            .tint(fill)
+            .controlSize(.large)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .layoutPriority(1)
     }
 }

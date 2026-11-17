@@ -31,6 +31,11 @@ struct AppNotice: Equatable, Sendable {
     let message: String
     let severity: Severity
     let action: Action?
+    /// What VoiceOver announces when the notice appears (issue #11), if shorter than title + message.
+    var spoken: String? = nil
+
+    /// The VoiceOver announcement for this notice (`AppModel.announceChanges()`).
+    var announcement: String { spoken ?? "\(title). \(message)" }
 }
 
 extension AppNotice.Action {

@@ -9,6 +9,8 @@ final class ModelHarness {
     let source: SyntheticFrameSource
     let thermal: FakeThermalMonitor
     let haptics = FakeHaptics()
+    /// What VoiceOver would have been told (issue #11).
+    let announcer = FakeAccessibilityAnnouncer()
     let screen = FakeScreenController()
     let library: FakePhotoLibrary
     let defaults: UserDefaults
@@ -49,7 +51,7 @@ final class ModelHarness {
         AppEnvironment(
             isUITest: false, source: source, photoLibrary: library, storage: storage,
             settingsStore: UserDefaultsSettingsStore(defaults: defaults), thermal: thermal,
-            battery: battery, screen: screen, haptics: haptics,
+            battery: battery, screen: screen, haptics: haptics, announcer: announcer,
             realTime: realTime, fakeLibrary: library, supportsCaptureButtons: false,
             backgroundTasks: backgroundTasks, appSettings: appSettings, scheduler: scheduler,
             diskCapacity: disk, voice: voice,

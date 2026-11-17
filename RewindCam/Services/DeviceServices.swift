@@ -118,6 +118,52 @@ final class FakeHaptics: Haptics {
     func failure() { failures += 1 }
 }
 
+/// How urgently VoiceOver should speak an announcement.
+enum AnnouncementPriority: Equatable, Sendable {
+    /// Queued behind what VoiceOver is saying (save results, recoveries, warnings).
+    case normal
+    /// Interrupts and can't be interrupted: recording stopped, a save failed.
+    case high
+}
+
+/// Speaks save results and state changes to VoiceOver users (issue #11; DESIGN.md "Accessibility").
+/// `AppModel` calls it for every toast and, once per change, for phase changes and new warnings
+/// (`AppModel.announceChanges()`), never on every status tick. Live: `UIAccessibility.post`
+/// (`.announcement`); tests: `FakeAccessibilityAnnouncer` records what would have been spoken.
+@MainActor
+protocol AccessibilityAnnouncer: AnyObject {
+    func announce(_ message: String, priority: AnnouncementPriority)
+}
+
+@MainActor
+final class SystemAccessibilityAnnouncer: AccessibilityAnnouncer {
+    func announce(_ message: String, priority: AnnouncementPriority) {
+        // Without VoiceOver (or another assistive technology) the notification is simply ignored.
+        let level: UIAccessibilityPriority = priority == .high ? .high : .default
+        let text = NSAttributedString(string: message, attributes: [
+            .accessibilitySpeechAnnouncementPriority: level.rawValue,
+        ])
+        UIAccessibility.post(notification: .announcement, argument: text)
+    }
+}
+
+@MainActor
+final class FakeAccessibilityAnnouncer: AccessibilityAnnouncer {
+    struct Announcement: Equatable {
+        let message: String
+        let priority: AnnouncementPriority
+    }
+
+    private(set) var announcements: [Announcement] = []
+    var messages: [String] { announcements.map(\.message) }
+
+    func announce(_ message: String, priority: AnnouncementPriority) {
+        announcements.append(Announcement(message: message, priority: priority))
+    }
+
+    func removeAll() { announcements.removeAll() }
+}
+
 /// Opens RewindCam's own page in the Settings app, where the user can allow the camera, microphone or
 /// Photos. Reached through `AppModel.openAppSettings()`, which every "Open Settings" button calls
 /// (`NoticeBanner`). Live: `UIApplication.openSettingsURLString`; tests: `FakeAppSettingsOpener`.

@@ -123,7 +123,7 @@ final class RewindCamUITests: XCTestCase {
         let save = app.buttons["saveButton"]
         XCTAssertFalse(save.isEnabled, "Save must be disabled while nothing is recorded")
         let badge = element(app, "recordingBadge")
-        XCTAssertFalse(badge.label.contains("REC"), "badge says: \(badge.label)")
+        XCTAssertEqual(badge.label, "Not recording, camera access is off")
         XCTAssertFalse(element(app, "microphoneBanner").exists)
         screenshot(app, "denied-1")
 
@@ -143,7 +143,7 @@ final class RewindCamUITests: XCTestCase {
         XCTAssertTrue(banner.waitForNonExistence(timeout: 15), "camera banner still shown after access was allowed")
         let enabled = NSPredicate(format: "isEnabled == true")
         wait(for: [expectation(for: enabled, evaluatedWith: save)], timeout: 15)
-        let recording = NSPredicate(format: "label BEGINSWITH %@", "REC")
+        let recording = NSPredicate(format: "label == %@", "Recording")
         wait(for: [expectation(for: recording, evaluatedWith: badge)], timeout: 15)
         screenshot(app, "denied-3-recording-after-return")
     }
@@ -239,7 +239,7 @@ final class RewindCamUITests: XCTestCase {
     func testPauseHoldsAcrossBackgroundUntilResume() {
         let app = launch()
         let badge = element(app, "recordingBadge")
-        let recording = NSPredicate(format: "label BEGINSWITH %@", "REC")
+        let recording = NSPredicate(format: "label == %@", "Recording")
         wait(for: [expectation(for: recording, evaluatedWith: badge)], timeout: 15)
         Thread.sleep(forTimeInterval: 4) // let the synthetic buffer fill a little
         let pause = app.buttons["pauseButton"]
@@ -299,7 +299,7 @@ final class RewindCamUITests: XCTestCase {
     @MainActor
     func testChangeBufferTo60Seconds() {
         let app = launch()
-        XCTAssertEqual(element(app, "bufferLabel").label, "Buffer 30 s")
+        XCTAssertEqual(element(app, "bufferLabel").label, "Buffer length 30 seconds")
         screenshot(app, "settings-1-main")
 
         app.buttons["settingsButton"].tap()
@@ -316,7 +316,7 @@ final class RewindCamUITests: XCTestCase {
 
         app.buttons["doneButton"].tap()
         let label = element(app, "bufferLabel")
-        let is60 = NSPredicate(format: "label == %@", "Buffer 60 s")
+        let is60 = NSPredicate(format: "label == %@", "Buffer length 60 seconds")
         wait(for: [expectation(for: is60, evaluatedWith: label)], timeout: 5)
         screenshot(app, "settings-4-main-60s")
     }
