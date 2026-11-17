@@ -37,7 +37,8 @@ struct PrivacyManifestTests {
             let category = try #require(entry["NSPrivacyAccessedAPIType"] as? String)
             reasons[category] = try #require(entry["NSPrivacyAccessedAPITypeReasons"] as? [String])
         }
-        // UserDefaults (UserDefaultsSettingsStore): app-only defaults -> CA92.1.
+        // UserDefaults (UserDefaultsSettingsStore: settings, and Dim's brightness to restore, #38): app-only
+        // defaults -> CA92.1.
         // volumeAvailableCapacityForImportantUsageKey (VolumeDiskCapacity, the low-disk guard of issue #10):
         // check there is enough space to write files -> E174.1.
         #expect(reasons == [

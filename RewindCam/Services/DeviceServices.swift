@@ -92,7 +92,14 @@ final class SystemScreenController: ScreenController {
 
 @MainActor
 final class FakeScreenController: ScreenController {
-    var brightness: CGFloat = 0.6
+    /// A screen that doesn't report exactly what was set (a clamped minimum, rounding; issue #38): every
+    /// set stores `readBack(newValue)`. nil: what is set is what reads back.
+    var readBack: (@MainActor (CGFloat) -> CGFloat)?
+    private var level: CGFloat = 0.6
+    var brightness: CGFloat {
+        get { level }
+        set { level = readBack?(newValue) ?? newValue }
+    }
     private(set) var idleTimerDisabled = false
     func setIdleTimerDisabled(_ disabled: Bool) { idleTimerDisabled = disabled }
 }
