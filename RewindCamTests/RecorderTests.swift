@@ -178,9 +178,9 @@ struct RecorderTests {
 
         // Control, same mode and same frames: without the audio input the writer emits segments. So the
         // stall above is caused by the unfed audio input alone. The frames are fed paced, as a camera
-        // feeds a writer that keeps up: a back-to-back burst into the real-time writer dropped as many
-        // frames as the machine's load made it, and under the stress run's load sometimes every frame
-        // that would have closed the second segment, so the wait below timed out (the flake).
+        // feeds a writer that keeps up. A back-to-back burst into the real-time writer dropped a timing- and
+        // load-dependent number of frames, in the stress run once so many that no segment reached
+        // controlStart + 2 and the wait below timed out (the flake; DESIGN.md §5).
         var config = h.recorder.currentConfiguration
         config.audioEnabled = false
         config.appendWaitLimit = 10
