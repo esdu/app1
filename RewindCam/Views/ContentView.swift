@@ -48,6 +48,9 @@ struct ContentView: View {
                         .foregroundStyle(.white.opacity(0.75))
                         .accessibilityIdentifier("fakeLibraryCount")
                         .accessibilityValue("\(model.fakeLibraryCount)")
+                    Text(model.uiTestDiagnostics)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white)
                 }
             }
             .padding(.horizontal, 16)

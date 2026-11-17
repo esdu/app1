@@ -59,6 +59,9 @@ final class AppModel {
     private(set) var isDimmed = false
     private(set) var savedClipCount = 0
     private(set) var fakeLibraryCount = 0
+    /// TEMPORARY (#9 diagnosis, UI test mode only): status-loop heartbeat and recorder state.
+    private(set) var uiTestDiagnostics = ""
+    @ObservationIgnored private var statusTicks = 0
     private(set) var previewImage: UncheckedSendable<CGImage>?
     private(set) var supportedResolutions: [VideoResolution]
     private(set) var orphansRemoved = 0
@@ -931,6 +934,15 @@ final class AppModel {
         refreshStatus()
         reconcileCapture()
         checkFrameWatchdog()
+        if environment.isUITest {
+            statusTicks += 1
+            let s = recorder.status()
+            uiTestDiagnostics = "t\(statusTicks) \(phase) g\(s.generation) "
+                + "v\(s.latestMediaTime.map { String(format: "%.1f", $0) } ?? "-") "
+                + "e\(s.lastSegmentEnd.map { String(format: "%.1f", $0) } ?? "-") "
+                + "s\(s.isSuspended ? 1 : 0) w\(frameWatchdog.isArmed ? 1 : 0) r\(recovery == nil ? 0 : 1) "
+                + "x\(environment.source.runState)"
+        }
     }
 
     /// **Frame watchdog** (issue #9), run on every status tick after the safety net. While capture is
