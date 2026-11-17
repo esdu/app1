@@ -177,6 +177,14 @@ final class RewindCamUITests: XCTestCase {
     @MainActor
     func testVideoStallRestartsCameraAndSaysSo() {
         let app = launch(extraArguments: ["-UITestStallVideo"])
+        // Screen-level captures (they don't need the app to answer accessibility queries).
+        for i in 0..<8 {
+            Thread.sleep(forTimeInterval: 2)
+            let attachment = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            attachment.name = "stall-diag-\(i)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
         let banner = element(app, "stallBanner")
         XCTAssertTrue(banner.waitForExistence(timeout: 40), "no banner after the video stopped")
         let what = banner.descendants(matching: .any)
