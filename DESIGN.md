@@ -73,7 +73,10 @@ The ring keeps the **minimal suffix of segments whose total duration ≥ buffer 
 every new segment it drops the oldest segment while the remaining ones still cover the buffer.
 It also enforces a hard **byte cap**: if bytes exceed the cap (an encoder overshoot), it drops the oldest
 segment even if coverage falls below the buffer length. Retained duration is therefore in
-`[N, N + one segment)`, about `N + 1 s`, and disk use for the ring is `≤ cap`.
+`[N, N + one segment)`, about `N + 1 s`, and disk use for the ring is `≤ cap`. The cap holds even for a
+single segment (issue #14): a newest segment that alone is over it is dropped too. The recorder refuses
+such a fragment before it reaches the ring (see "Bounded disk" → "Queued fragment data"), so this only
+matters when the cap shrinks in place; what the ring keeps is always one contiguous run.
 
 ### Save (pre-roll + post-roll)
 
@@ -459,12 +462,78 @@ Bitrates are pinned per preset (`AVVideoAverageBitRateKey`), so disk use is pred
 peaks and container overhead, and the 3 s covers the extra segment held plus the one being written.
 Example: 1080p30 with 120 s gives 1.258 MB/s × 123 s × 1.5 ≈ **232 MB**.
 
-**Worst case during a save**: ring cap + post-roll segments (≤ 30 s × rate, hard-linked)
-+ concatenated temp file (≤ clip) + exported `.mov` (≤ clip, in `UnsavedClips/`). For 4K60, 120 s and
-30 s post-roll that is about 1.15 GB + 0.19 GB + 2 × 0.94 GB ≈ 3.2 GB for a few seconds. For the default (1080p30, 30 s,
-no post-roll) it is about 62 MB + 2 × 38 MB ≈ 138 MB. The segments and the temp file are deleted as
-soon as the export finishes; the `.mov` as soon as Photos has the clip. The Photos staging link adds no
-bytes.
+**Worst case during a save** (nominal sizes, what #10's free-space checks use): ring cap + post-roll
+segments (≤ 30 s × rate, hard-linked) + concatenated temp file (≤ clip) + exported `.mov` (≤ clip, in
+`UnsavedClips/`). For 4K60, 120 s and 30 s post-roll that is about 1.15 GB + 0.19 GB + 2 × 0.94 GB ≈ 3.2 GB
+for a few seconds. For the default (1080p30, 30 s, no post-roll) it is about 62 MB + 2 × 38 MB ≈ 138 MB.
+The segments and the temp file are deleted as soon as the export finishes; the `.mov` as soon as Photos
+has the clip. The Photos staging link adds no bytes.
+
+#### Working-set budgets (issue #14)
+
+The ring cap bounds the ring, but a save adds its own files, and fragment data waits in memory before
+it is written. Two separate budgets, both derived from the same settings as the ring cap
+(`BufferMath.swift`, "Working-set budgets"):
+
+**Queued fragment data (memory).** The writer delegate hands each fragment over as a `Data` and returns at
+once; the fragment then waits for the recorder queue, which writes it. Before the delegate retains it,
+it is admitted against `FragmentQueueLimit` (`BufferMath.fragmentQueueLimit`): at most **8 fragments**
+(≈ 8 s of writes the disk hasn't kept up with) and **max(16 MB, 4 s × rate × 1.5)** bytes (4K60:
+37.5 MB; every 1080p and 720p preset: 16 MB), and no single fragment larger than that or the ring cap.
+Healthy storage keeps the queue at 0–1. The counters (`RollingRecorder.fragmentQueue()`) are
+thread-safe; every admitted fragment is released exactly once, when its queue block ends (written,
+stale, refused or failed), and the delegate never blocks.
+
+*At the bound* (or for one oversized fragment) the fragment is let go at once, every later fragment of
+that writer is refused too, and on the recorder queue its generation **stops**: the writer is cancelled,
+the ring folder deleted, and a save waiting for its post-roll is settled once with the contiguous footage
+it already has (fragments queued after the refusal point are dropped, so there is never a hole that an
+export could span). The recorder then **halts** (`RecorderHalt.backlog`, in `RecorderStatus.halt`):
+it ignores samples until `resume()`/`reset()`, so the same shortage can't become an automatic restart
+loop. A segment that fails to write (`RecorderHalt.writeFailed`, usually a full disk) is handled the
+same way instead of being skipped. `AppModel` sees the halt on the next status tick (0.5 s, before the
+frame watchdog could mistake it for a stall) and stops capture: below #10's reserve it is the
+out-of-space stop, otherwise **"Not recording"** with the reason and **Try Again**. A stale writer's
+late callbacks are admitted, dropped and released; they can't recreate a deleted generation folder.
+
+**Temporary media on disk.** `BufferMath.temporaryMediaCapBytes` = ring cap + one save's job folder
+(`saveBundleCapBytes`: the ring cap for `N + postRoll` seconds) + its export output (source + 5 % +
+256 kB). While `source.mp4` is written the job's segments still exist (ring + job + source ≤ ring +
+2 × job); then they are deleted and the output is written (ring + source + output). Both fit the cap.
+Only one save runs at a time. Kept clips are not temporary and come on top.
+
+| Settings | Ring cap | Save job cap | Export output | **Temporary cap** | #10 estimate |
+|---|---|---|---|---|---|
+| 1080p30, 30 s, no post-roll (defaults) | 62.3 MB | 62.3 MB | 65.6 MB | **190 MB** | 138 MB |
+| 4K60, 120 s, +30 s | 1.15 GB | 1.44 GB | 1.51 GB | **4.1 GB** | 3.2 GB |
+
+The cap is higher than #10's estimate because it applies the 1.5 overhead factor everywhere; it is the
+bound, the estimate is the usual size. Each part is enforced where it is written:
+
+* **Ring**: `SegmentRing`'s strict cap; no admitted fragment is larger than the cap.
+* **Save job folder**: hard links cost nothing. If a link fails (another volume, or a file system without
+  links), the segment is copied, but only if `TemporarySpace` grants its size above the reserve; linking
+  runs newest first, so what doesn't fit is the oldest footage. A post-roll segment that would take the
+  folder past its cap, or whose copy has no room, settles the save early (`SaveLimit`).
+* **Export**: before anything is written, `AppModel.exportDurably` asks `DiskSpacePolicy.exportAdmission`
+  how much of the bundle fits, from the sizes of the files on disk: the newest segments whose source +
+  output fit in free space above the save floor. All of it, a newer part (the clip still ends where asked
+  and starts later), or none ("Nothing was saved … free up about X"). The peak is then reserved in
+  `TemporarySpace` until the export ends, and passed to `AVAssetExportSession` as `fileLengthLimit`.
+* **Photos staging**: a hard link (0 bytes); a copy only if linking fails, admitted like the rest. If it
+  doesn't fit, the clip stays kept for Retry.
+
+**Measured, not only estimated.** `BufferStorage.measureWorkingSet()` enumerates the folders and reports
+`MediaWorkingSet`: ring, save jobs (copies, links to segments the ring has since evicted, `source.mp4`),
+exports (`.partial.mov`), staging copies, and kept clips separately. Each physical file counts once
+(same device and inode): a save's link to a ring segment, or a staging link to a kept clip, adds
+nothing; copies and independent source/output bytes do. Settings shows "Temporary video: X of at most Y",
+and the tests check these numbers, not `RecorderStatus.bytes`.
+
+**Unavoidable overshoot.** `fileLengthLimit` is documented as approximate: an export can write slightly
+past it. That, and a write already in flight when free space is read, are covered only by the 64 MB
+reserve. The `Data` a fragment arrives in is allocated by AVFoundation before the delegate sees it, so one
+fragment over the bound exists in memory for the duration of that call; it is never retained.
 
 **Unsaved clips** are outside that bound: each clip that didn't reach Photos keeps its full size
 (≤ (N + post-roll) × rate, e.g. 38 MB for the default, ≈ 0.94 GB for 4K60 with 120 s + 30 s) in
@@ -527,11 +596,21 @@ Choices the issue left open, and why:
   in red when it doesn't fit (orange when only a save may not fit), and lists the buffer lengths that
   don't fit.
 
-**Estimates, not reservations.** These are pre-checks on nominal sizes. A save can still fail if VBR
-peaks or other apps use the space meanwhile; it then fails with a message, and the guard stops capture
-at the reserve. Bounding queued fragment data and accounting for the actual temporary working set
-(hard-link vs copy fallback, export peaks) is issue #14, which reuses `DiskCapacityProvider` and
-`DiskSpacePolicy` rather than adding thresholds of its own.
+**Estimates warn; actual sizes decide (issue #14).** The checks above are pre-checks on nominal sizes
+and only warn: a save is never refused when Save is tapped. What a save may then write is decided from
+the actual file sizes (see "Working-set budgets" above), against the same reserve; no second threshold:
+
+* **Save floor** (`DiskSpacePolicy.saveFloorBytes`): while capture writes, a save's temporary files
+  (copies, `source.mp4`, the export, a staging copy) must leave the **reserve** free, because the ring
+  grows into it between two checks. Once capture has stopped (out of space, interrupted, halted), nothing
+  else of RewindCam's writes, so a save may use what is free, best effort, but never more.
+* **Reservations** (`TemporarySpace`): a running export's peak is reserved until it ends. Every free-space
+  read in `AppModel` (start, the 5 s check, a longer buffer, Save, Settings) is free space minus those
+  reservations, so a start during an export already counts the export's remaining bytes.
+* **The best-effort save of #10, reconciled**: Save → warning toast if the estimate doesn't fit →
+  export of everything that fits above the floor. A save cut short says so ("It's shorter than asked:
+  there wasn't enough free space for all of it"); one with no room for even its last second writes
+  nothing and says how much to free. Neither ever deletes a kept clip or fills the disk past the floor.
 
 Not covered by CI: the real `volumeAvailableCapacityForImportantUsage` on a full phone (it includes
 purgeable space iOS frees on demand, so it can read higher than Settings shows), and real write failures.
@@ -577,11 +656,18 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   `-UITestDenyCamera` makes its start throw `.cameraAccessDenied` until Open Settings is tapped (standing
   in for the user allowing it), and `-UITestNoCamera` makes it throw `.noCamera` (Try Again path).
   `-UITestLowDisk` makes free space read 90 MB (the low-disk guard, issue #10).
+* **Working-set stress** (issue #14, `WorkingSetTests`): `RecorderHarness` with injected storage
+  (`MediaFileOperations`: writes that stall or fail, hard links that fail) and fragment callbacks driven
+  straight into the writer delegate. A stalled write plus a burst checks the queued-fragment bound and
+  the halt; an oversized fragment, a full disk, forced copy fallback with little room, exports while
+  capture continues, and a soak over every preset and buffer length (bitrates ÷100, VBR 0.5–1.5×, and an
+  8× overshoot at 4K60) check the disk bounds by enumerating the folders.
 * **Not covered by CI**: `CameraFrameSource` (including the real camera and microphone prompts and
   their failure paths), `AVCaptureEventInteraction` (volume buttons),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),
   background-task time after locking the phone, Data Protection (the Simulator doesn't enforce it),
-  and battery drain. See the manual checklist in the README.
+  battery drain, and real peak storage and memory at 4K60 with slow storage (issue #14's bounds are
+  checked deterministically, not measured on a device). See the manual checklist in the README.
 
 ## 6. Voice trigger (stretch)
 

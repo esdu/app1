@@ -16,8 +16,11 @@ final class RecorderHarness {
     let frameRate: Int
 
     /// `audio` configures the writer; `sourceAudio` (default: same) whether the source emits audio.
+    /// `space` and `fileOperations` (issue #14): free space for copies when links fail, and the
+    /// storage the recorder writes through (tests make it slow, failing, or link-less).
     init(buffer: Double, audio: Bool, sourceAudio: Bool? = nil, frameRate: Int = 15, width: Int = 320,
-         height: Int = 180, videoBitrate: Int = 1_000_000, realTime: Bool = false, appendWaitLimit: Double = 10) {
+         height: Int = 180, videoBitrate: Int = 1_000_000, realTime: Bool = false, appendWaitLimit: Double = 10,
+         space: TemporarySpace? = nil, fileOperations: MediaFileOperations = .live) {
         root = FileManager.default.temporaryDirectory
             .appendingPathComponent("RewindCamTests-\(UUID().uuidString)", isDirectory: true)
         storage = FileBufferStorage(root: root)
@@ -30,7 +33,9 @@ final class RecorderHarness {
         recorder = RollingRecorder(
             bufferDirectory: storage.bufferDirectory,
             clipsDirectory: storage.clipsDirectory,
-            configuration: configuration)
+            configuration: configuration,
+            space: space,
+            fileOperations: fileOperations)
         source = SyntheticFrameSource(
             format: .init(width: width, height: height, frameRate: frameRate, audioEnabled: sourceAudio ?? audio),
             mode: .manual)

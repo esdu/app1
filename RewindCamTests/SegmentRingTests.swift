@@ -40,10 +40,30 @@ struct SegmentRingTests {
         #expect(ring.segments.count == 10)
     }
 
-    @Test func alwaysKeepsNewestSegment() {
+    /// Issue #14: the cap holds even for one segment. A segment that alone is over the cap is evicted
+    /// too (the recorder refuses such fragments before they reach the ring; this covers a cap that
+    /// shrank in place), and the next one that fits starts a new contiguous run.
+    @Test func capHoldsEvenForOneOversizedSegment() {
         var ring = SegmentRing(bufferDuration: 1, byteCap: 10)
+        let evicted = ring.append(segment(0, start: 0, bytes: 500))
+        #expect(ring.segments.isEmpty)
+        #expect(evicted.map(\.index) == [0])
+        #expect(ring.totalBytes <= 10)
+        _ = ring.append(segment(1, start: 1, bytes: 8))
+        #expect(ring.segments.map(\.index) == [1])
+
+        var shrinking = SegmentRing(bufferDuration: 30, byteCap: 5_000)
+        for i in 0..<5 { _ = shrinking.append(segment(i, start: Double(i), bytes: 1_000)) }
+        shrinking.byteCap = 900
+        #expect(shrinking.evict().count == 5)
+        #expect(shrinking.totalBytes <= 900)
+    }
+
+    @Test func newestSegmentWithinCapIsKept() {
+        var ring = SegmentRing(bufferDuration: 1, byteCap: 1_000)
         _ = ring.append(segment(0, start: 0, bytes: 500))
-        #expect(ring.segments.count == 1)
+        _ = ring.append(segment(1, start: 1, bytes: 900))
+        #expect(ring.segments.map(\.index) == [1])
     }
 
     @Test func shrinkingBufferEvictsInPlace() {

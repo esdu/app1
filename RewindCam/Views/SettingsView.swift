@@ -21,6 +21,11 @@ struct SettingsView: View {
                                        value: "\(model.unsavedClips.count) · \(BufferMath.formatted(bytes: model.unsavedClipBytes))")
                             .accessibilityIdentifier("unsavedSpaceRow")
                     }
+                    // Measured buffer + saves in progress, and the most they can take (issue #14).
+                    LabeledContent("Temporary video",
+                                   value: "\(BufferMath.formatted(bytes: model.workingSet.temporaryBytes)) "
+                                       + "of at most \(BufferMath.formatted(bytes: model.temporaryMediaCapBytes))")
+                        .accessibilityIdentifier("workingSetRow")
                     DiskFitNote()
                 } header: {
                     Text("Rewind buffer")
