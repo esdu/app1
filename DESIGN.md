@@ -2,8 +2,9 @@
 
 RewindCam is a private, offline "pre-record" camera. It records all the time into a
 rolling buffer of fixed length. When something happens, the user taps **Save** (or
-presses a volume button) and the last *N* seconds, plus an optional post-roll, go to
-Photos as one clip. The app has no network code, no accounts and no analytics.
+presses a volume button, or says "save that") and the last *N* seconds, plus an optional post-roll, go to
+Photos as one clip. The app has no network code, no accounts and no analytics. It is a camera, not a
+baby monitor, and says so in README.md and at the end of Settings.
 
 ## 1. Architecture
 
@@ -30,7 +31,7 @@ Photos as one clip. The app has no network code, no accounts and no analytics.
 | Capture | `FrameSource` protocol: `CameraFrameSource` (AVCaptureSession) and `SyntheticFrameSource` (test-pattern `CVPixelBuffer`s + silent PCM) | `SyntheticFrameSource` in manual mode (frames generated as fast as the encoder takes them, with synthetic timestamps) |
 | Buffer | `RollingRecorder` (writer + segment files) and `SegmentRing` (pure eviction policy) | unit tests, no camera needed |
 | Export | `ClipExporter`: concatenate init + segments, trim with `AVMutableComposition`, passthrough export to `.mov` | unit tests load the result with `AVURLAsset` and decode every frame |
-| Side effects | `PhotoLibrary`, `BufferStorage`, `BackgroundTasks`, `MediaClock`, `ThermalMonitor`, `BatteryMonitor`, `SettingsStore`, `AppSettingsOpener`, `DelayScheduler`, `DiskCapacityProvider` (all protocols) | fakes in tests and in `-UITestMode` |
+| Side effects | on `AppEnvironment`: `PhotoLibrary`, `BufferStorage`, `SettingsStore`, `ThermalMonitor`, `BatteryMonitor`, `ScreenController`, `Haptics`, `AccessibilityAnnouncer`, `BackgroundTasks`, `AppSettingsOpener`, `DelayScheduler`, `DiskCapacityProvider`, `VoiceTrigger`, `WallClock`, `MonotonicClock`; and `MediaClock` for the synthetic source's timestamps (all protocols) | fakes in unit tests; `-UITestMode` swaps the camera, Photos, settings store, Settings opener and (with `-UITestLowDisk*`) free space |
 | UI | SwiftUI; `AppModel` is the single source of truth | XCUITest with `-UITestMode` |
 
 ### Threading (Swift 6 strict concurrency)
@@ -39,8 +40,9 @@ Photos as one clip. The app has no network code, no accounts and no analytics.
 * `RollingRecorder` owns one serial `DispatchQueue`. Sources call `consume(_:kind:)`
   from their own capture queue, and it hops onto the recorder queue with `queue.sync`. That gives
   natural back-pressure (the synthetic source in tests cannot outrun the encoder) and keeps the
-  writer single-threaded. The writer's segment delegate never blocks: it copies the `Data` and
-  `async`s back onto the recorder queue.
+  writer single-threaded. The writer's segment delegate never blocks: it retains the fragment's `Data`
+  only if it fits the queued-fragment bound (§2, "Working-set budgets") and `async`s back onto the
+  recorder queue.
 * Classes that guard their state with a queue or lock are marked `@unchecked Sendable`, and the
   reason is written next to each one.
 
@@ -105,7 +107,9 @@ matters when the cap shrinks in place; what the ring keeps is always one contigu
    failure. The banner and the clips survive relaunches.
 
 If less than *N* seconds is buffered (e.g. 4 s after launch), the clip is whatever exists.
-Only one save can be pending at a time. A second tap during post-roll shows "Already saving".
+Only one save runs at a time (`AppModel.isSaving`): until it has finished (post-roll, export and the
+Photos import), another Save, volume-button press or voice trigger shows "Already saving — hold on…"
+and saves nothing.
 
 ### Save path: durability
 
@@ -669,9 +673,9 @@ Choices the issue left open, and why:
   `requiredBytesToBuffer`) and stops recording if it can't fit, instead of growing into the reserve.
 * **Unsaved clips** (#1) are never deleted or evicted to make room. The banners say how many there are
   and how much they take ("2 clips waiting for Photos use 76 MB."), and Settings lists them.
-* **Settings** shows free space under the buffer picker, marks the current buffer at the current quality
-  in red when it doesn't fit (orange when only a save may not fit), and lists the buffer lengths that
-  don't fit.
+* **Settings** shows free space under the buffer picker, adds a note with a red icon when the current
+  buffer doesn't fit at the current quality (orange when only a save may not fit), and lists the buffer
+  lengths that don't fit in the section footer.
 
 **Estimates warn; actual sizes decide (issue #14).** The checks above are pre-checks on nominal sizes
 and only warn: a save is never refused when Save is tapped. What a save may then write is decided from
@@ -707,14 +711,22 @@ process (crash, kill, OOM). Finished clips in `UnsavedClips/` are kept (see "Sav
 The governor is a pure function, and `AppModel` applies it when `ProcessInfo.thermalState` changes.
 The user's own setting is never overwritten. When the phone cools to fair or nominal, the user's preset comes back.
 Each change restarts the writer (new generation), and the UI shows a banner such as
-"Phone is hot — recording at 720p 30 fps".
+"Phone is hot — recording at 720p 30 fps until it cools down." Settings shows the thermal state as
+"Phone temperature" (Normal, Warm, Hot, Very hot).
+
+Resolutions are offered only where the camera has a 30 fps format for them; 60 fps is offered for all.
+`CameraFrameSource` picks the requested frame rate and falls back to 30 fps when the camera has no 60 fps
+format at that resolution. The labels and the bitrate still follow the setting, so such a clip is 30 fps
+at the 60 fps bitrate (README "Known limits"; the device checklist checks it).
 
 ## 4. Long sessions
 
 * `UIApplication.isIdleTimerDisabled = true` while the camera runs.
 * **Dim**: a black overlay at 92 % opacity, with screen brightness set to 0.02 (the previous value is restored when you tap to
   wake). The camera keeps recording under the overlay, and the volume buttons still save.
-* Battery level and state come from `UIDevice` and are shown in the status bar ("—" in the Simulator).
+* Battery level and state come from `UIDevice` and are shown in the status bar and in Settings. In the
+  Simulator the level is unknown: the status bar shows the icon alone (VoiceOver: "Battery level
+  unknown") and Settings says "Unknown".
 * Background: iOS doesn't let third-party apps use the camera in the background, so the
   session stops and the buffer is cleared. The UI says so up front ("Keep RewindCam open — iOS
   can't record in the background"). On return to the foreground, capture restarts on its own.
@@ -777,6 +789,8 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   in for the user allowing it), and `-UITestNoCamera` makes it throw `.noCamera` (Try Again path).
   `-UITestLowDisk` makes free space read 90 MB (the low-disk guard, issue #10).
   `-UITestLowDiskWarning` makes it read 150 MB (recording with the low-storage warning).
+  `-UITestStallVideo` makes the synthetic camera stop delivering video 3 s after it starts while it still
+  "runs", until it is restarted (the frame watchdog, issue #9).
 * **Working-set stress** (issue #14, `WorkingSetTests`): `RecorderHarness` with injected storage
   (`MediaFileOperations`: writes that stall or fail, hard links that fail) and fragment callbacks driven
   straight into the writer delegate. A stalled write plus a burst checks the queued-fragment bound and
@@ -798,8 +812,11 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   their failure paths), `AVCaptureEventInteraction` (volume buttons),
   real thermal behaviour, real Photos (permission prompt, denial, `performChanges` errors),
   background-task time after locking the phone, Data Protection (the Simulator doesn't enforce it),
-  battery drain, and real peak storage and memory at 4K60 with slow storage (issue #14's bounds are
-  checked deterministically, not measured on a device). See the manual checklist in the README.
+  battery drain, real peak storage and memory at 4K60 with slow storage (issue #14's bounds are
+  checked deterministically, not measured on a device), the speech recogniser, real VoiceOver speech,
+  and sound/picture sync and segment joins in clips from the real camera (unit tests decode every frame
+  of an export, but the synthetic source's audio is silent). Nothing has been run on a physical iPhone
+  yet; README.md's "Manual test checklist (real device)" covers each of these.
 
 ## 6. Voice trigger (stretch)
 
@@ -811,6 +828,8 @@ Each change restarts the writer (new generation), and the UI shows a banner such
   With voice on and "Record sound" off, the mic is captured for recognition only, and the
   recorder's writer still has no audio track. If the microphone is denied, the trigger isn't
   started; the microphone notice and the "Listening" row say why (§2, "What the source delivers").
+  If Speech Recognition is denied, a toast says "Allow Speech Recognition in Settings to use the voice
+  trigger." and the "Listening" row says "No".
 * The recognition request is recycled every 50 s, after each final result or error, and after every trigger
   (so the transcript is cleared and the phrase can't fire twice). There is a 3 s cooldown.
 * **One task at a time, by identity.** Each recognition request/task gets a generation number that
